@@ -24,6 +24,8 @@
         const addParticipantBtn = document.getElementById('add-participant');
         const infoMessage = document.getElementById('info-message');
         const distributeBtn = document.getElementById('distribute');
+        const clearDutiesBtn = document.getElementById('clear-duty');
+        const reportBtn = document.getElementById('generate-report');
         const eventMenu = document.getElementById('event-menu');
         const modal = createModal();
 
@@ -62,6 +64,12 @@
             }
         });
         distributeBtn.addEventListener('click', handleAutoAssign);
+        if (clearDutiesBtn) {
+            clearDutiesBtn.addEventListener('click', handleClearDuties);
+        }
+        if (reportBtn) {
+            reportBtn.addEventListener('click', handleReportDownload);
+        }
 
         document.addEventListener('click', (event) => {
             if (eventMenu.classList.contains('hidden')) {
@@ -504,6 +512,85 @@
                 infoMessage.textContent = 'Дежурства успешно распределены.';
             }
             loadCalendar();
+        }
+
+        function handleClearDuties() {
+            modal.confirm('Удалить все дежурства за выбранный месяц?').then((confirmed) => {
+                if (!confirmed) return;
+                const formData = new FormData();
+                formData.append('action', 'clear_month_duties');
+                formData.append('month', state.month);
+                formData.append('year', state.year);
+
+                fetch('api.php', {
+                    method: 'POST',
+                    body: formData,
+                })
+                    .then((response) => {
+                        if (!response.ok) {
+                            return response
+                                .json()
+                                .catch(() => {
+                                    throw new Error('Не удалось очистить дежурства.');
+                                })
+                                .then((data) => {
+                                    throw new Error(data.error || 'Не удалось очистить дежурства.');
+                                });
+                        }
+                        return response.json();
+                    })
+                    .then((data) => {
+                        const count = Number(data.cleared || 0);
+                        infoMessage.textContent = count > 0
+                            ? 'Все дежурства текущего месяца удалены.'
+                            : 'За выбранный месяц не найдено дежурств.';
+                        loadCalendar();
+                    })
+                    .catch((error) => {
+                        infoMessage.textContent = error.message || 'Не удалось очистить дежурства.';
+                    });
+            });
+        }
+
+        function handleReportDownload() {
+            const formData = new FormData();
+            formData.append('action', 'generate_report');
+            formData.append('month', state.month);
+            formData.append('year', state.year);
+
+            infoMessage.textContent = 'Формируется отчет…';
+
+            fetch('api.php', {
+                method: 'POST',
+                body: formData,
+            })
+                .then((response) => {
+                    const contentType = response.headers.get('Content-Type') || '';
+                    if (!response.ok) {
+                        if (contentType.includes('application/json')) {
+                            return response.json().then((data) => {
+                                throw new Error(data.error || 'Не удалось сформировать отчет.');
+                            });
+                        }
+                        throw new Error('Не удалось сформировать отчет.');
+                    }
+                    return response.blob();
+                })
+                .then((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    const month = String(state.month).padStart(2, '0');
+                    link.href = url;
+                    link.download = `График-${state.year}-${month}.docx`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    setTimeout(() => URL.revokeObjectURL(url), 2000);
+                    infoMessage.textContent = 'Отчет сформирован и загружен.';
+                })
+                .catch((error) => {
+                    infoMessage.textContent = error.message || 'Не удалось сформировать отчет.';
+                });
         }
     }
 

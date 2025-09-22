@@ -151,7 +151,8 @@ a {
 
 .control-button,
 .primary-button,
-.secondary-button {
+.secondary-button,
+.danger-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -203,6 +204,19 @@ a {
 .secondary-button:hover {
     border-color: rgba(99, 102, 241, 0.45);
     color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.danger-button {
+    background: linear-gradient(135deg, #f97316, #ea580c);
+    color: #fff;
+    border-color: rgba(234, 88, 12, 0.65);
+    box-shadow: 0 14px 28px rgba(234, 88, 12, 0.28);
+}
+
+.danger-button:hover {
+    background: linear-gradient(135deg, #f97316, #c2410c);
+    box-shadow: 0 20px 34px rgba(234, 88, 12, 0.35);
     transform: translateY(-1px);
 }
 
@@ -596,7 +610,8 @@ a {
     }
 
     .primary-button,
-    .secondary-button {
+    .secondary-button,
+    .danger-button {
         width: 100%;
     }
 }

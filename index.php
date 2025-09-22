@@ -36,6 +36,8 @@ $page = $page === 'stats' ? 'stats' : 'home';
                     </div>
                     <div class="calendar-actions">
                         <button type="button" id="distribute" class="primary-button">Распределить</button>
+                        <button type="button" id="clear-duty" class="danger-button">Очистить</button>
+                        <button type="button" id="generate-report" class="secondary-button">Отчет</button>
                         <button type="button" id="add-participant" class="secondary-button">Добавить участника</button>
                     </div>
                 </div>

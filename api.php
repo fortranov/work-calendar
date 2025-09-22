@@ -6,7 +6,6 @@ header('Content-Type: application/json; charset=utf-8');
 $action = $_POST['action'] ?? null;
 
 if ($action === null) {
-
     log_warning('Получен запрос без указания действия', [
         'keys' => array_keys($_POST),
         'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
@@ -753,16 +752,10 @@ function createDutyReportDocx(array $headers, array $rows, int $year, int $month
     $title = sprintf('График дежурств — %s %d', monthNameRu($month), $year);
     $documentXml = buildReportDocumentXml($title, $headers, $rows);
 
-    $tmpFile = tempnam(sys_get_temp_dir(), 'duty_report_');
-    if ($tmpFile === false) {
-        throw new RuntimeException('Не удалось создать временный файл для отчета');
-    }
+    $tmpFile = createReportTempFile();
 
     $zip = new ZipArchive();
-    $opened = $zip->open($tmpFile, ZipArchive::OVERWRITE);
-    if ($opened !== true) {
-        $opened = $zip->open($tmpFile, ZipArchive::CREATE);
-    }
+    $opened = $zip->open($tmpFile, ZipArchive::OVERWRITE | ZipArchive::CREATE);
 
     if ($opened !== true) {
         @unlink($tmpFile);
@@ -777,6 +770,56 @@ function createDutyReportDocx(array $headers, array $rows, int $year, int $month
     $zip->close();
 
     return $tmpFile;
+}
+
+function createReportTempFile(): string
+{
+    $directories = [];
+
+    $customDir = trim((string) (getenv('APP_REPORT_TEMP_DIR') ?: ''));
+    if ($customDir !== '') {
+        if (!preg_match('/^(?:[a-zA-Z]:\\\\|\\\\\\\\|\/)/', $customDir)) {
+            $customDir = __DIR__ . DIRECTORY_SEPARATOR . $customDir;
+        }
+        $directories[] = $customDir;
+    }
+
+    $directories[] = __DIR__ . DIRECTORY_SEPARATOR . 'data';
+    $directories[] = __DIR__ . DIRECTORY_SEPARATOR . 'App_Data';
+    $directories[] = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'work-calendar';
+    $directories[] = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR);
+
+    $attempted = [];
+
+    foreach ($directories as $dir) {
+        $dir = rtrim($dir, "\\/");
+        if ($dir === '' || isset($attempted[$dir])) {
+            continue;
+        }
+        $attempted[$dir] = true;
+
+        if (!ensureDirectoryWritable($dir)) {
+            log_warning('Каталог недоступен для временного файла отчета', [
+                'directory' => $dir,
+            ]);
+            continue;
+        }
+
+        $tmp = @tempnam($dir, 'duty_report_');
+        if ($tmp !== false) {
+            log_info('Создан временный файл для отчета', [
+                'directory' => $dir,
+                'file' => $tmp,
+            ]);
+            return $tmp;
+        }
+
+        log_warning('Не удалось создать временный файл в каталоге для отчета', [
+            'directory' => $dir,
+        ]);
+    }
+
+    throw new RuntimeException('Не удалось создать временный файл для отчета');
 }
 
 function buildReportDocumentXml(string $title, array $headers, array $rows): string

@@ -1,0 +1,4 @@
+/data/*.db
+/data/*.sqlite
+/App_Data/*.db
+/App_Data/*.sqlite

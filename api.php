@@ -6,6 +6,7 @@ header('Content-Type: application/json; charset=utf-8');
 $action = $_POST['action'] ?? null;
 
 if ($action === null) {
+
     log_warning('Получен запрос без указания действия', [
         'keys' => array_keys($_POST),
         'ip' => $_SERVER['REMOTE_ADDR'] ?? null,

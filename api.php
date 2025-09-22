@@ -6,10 +6,21 @@ header('Content-Type: application/json; charset=utf-8');
 $action = $_POST['action'] ?? null;
 
 if ($action === null) {
+
+    log_warning('Получен запрос без указания действия', [
+        'keys' => array_keys($_POST),
+        'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+    ]);
     http_response_code(400);
     echo json_encode(['error' => 'Неизвестное действие'], JSON_UNESCAPED_UNICODE);
     exit;
 }
+
+
+log_info('Начало обработки API-запроса', [
+    'action' => $action,
+    'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+]);
 
 try {
     $db = get_db();
@@ -40,11 +51,18 @@ try {
             handleGetStatistics($db);
             break;
         default:
+            log_warning('Запрошено неизвестное действие', [
+                'action' => $action,
+            ]);
             http_response_code(400);
             echo json_encode(['error' => 'Неизвестное действие'], JSON_UNESCAPED_UNICODE);
             break;
     }
 } catch (Throwable $e) {
+    log_error('Ошибка при обработке API-запроса', [
+        'action' => $action,
+        'error' => $e->getMessage(),
+    ]);
     http_response_code(500);
     echo json_encode([
         'error' => 'Произошла ошибка',
@@ -56,6 +74,11 @@ function handleGetCalendar(PDO $db): void
 {
     $month = max(1, min(12, (int) ($_POST['month'] ?? date('n'))));
     $year = (int) ($_POST['year'] ?? date('Y'));
+
+    log_info('Запрошен календарь', [
+        'month' => $month,
+        'year' => $year,
+    ]);
 
     $participants = fetchParticipants($db);
     [$startDate, $endDate] = monthBounds($year, $month);
@@ -79,6 +102,7 @@ function handleAddParticipant(PDO $db): void
 {
     $name = trim((string) ($_POST['name'] ?? ''));
     if ($name === '') {
+        log_warning('Попытка добавить участника с пустым именем');
         http_response_code(422);
         echo json_encode(['error' => 'Имя не может быть пустым'], JSON_UNESCAPED_UNICODE);
         return;
@@ -91,13 +115,22 @@ function handleAddParticipant(PDO $db): void
         ':sort' => $maxSort + 1,
     ]);
 
-    echo json_encode(['participant' => ['id' => $db->lastInsertId(), 'name' => $name]], JSON_UNESCAPED_UNICODE);
+    $id = (int) $db->lastInsertId();
+    log_info('Добавлен новый участник', [
+        'id' => $id,
+        'name' => $name,
+    ]);
+
+    echo json_encode(['participant' => ['id' => $id, 'name' => $name]], JSON_UNESCAPED_UNICODE);
 }
 
 function handleDeleteParticipant(PDO $db): void
 {
     $id = (int) ($_POST['id'] ?? 0);
     if ($id <= 0) {
+        log_warning('Попытка удалить участника с некорректным идентификатором', [
+            'id' => $id,
+        ]);
         http_response_code(422);
         echo json_encode(['error' => 'Некорректный идентификатор'], JSON_UNESCAPED_UNICODE);
         return;
@@ -106,6 +139,10 @@ function handleDeleteParticipant(PDO $db): void
     $stmt = $db->prepare('DELETE FROM participants WHERE id = :id');
     $stmt->execute([':id' => $id]);
 
+    log_info('Удалён участник', [
+        'id' => $id,
+    ]);
+
     echo json_encode(['success' => true], JSON_UNESCAPED_UNICODE);
 }
 
@@ -113,6 +150,7 @@ function handleReorderParticipants(PDO $db): void
 {
     $order = $_POST['order'] ?? [];
     if (!is_array($order)) {
+        log_warning('Попытка изменить порядок участников с некорректными данными');
         http_response_code(422);
         echo json_encode(['error' => 'Некорректный формат'], JSON_UNESCAPED_UNICODE);
         return;
@@ -126,6 +164,10 @@ function handleReorderParticipants(PDO $db): void
         ]);
     }
 
+    log_info('Обновлён порядок участников', [
+        'order' => array_values(array_map('intval', $order)),
+    ]);
+
     echo json_encode(['success' => true], JSON_UNESCAPED_UNICODE);
 }
 
@@ -137,6 +179,12 @@ function handleSaveEvent(PDO $db): void
     $end = (string) ($_POST['end_date'] ?? '');
 
     if ($participantId <= 0 || $type === '' || $start === '') {
+        log_warning('Попытка сохранить событие с неполными данными', [
+            'participant_id' => $participantId,
+            'type' => $type,
+            'start' => $start,
+            'end' => $end,
+        ]);
         http_response_code(422);
         echo json_encode(['error' => 'Недостаточно данных'], JSON_UNESCAPED_UNICODE);
         return;
@@ -147,6 +195,10 @@ function handleSaveEvent(PDO $db): void
     }
 
     if (!validateDate($start) || !validateDate($end) || $end < $start) {
+        log_warning('Попытка сохранить событие с некорректными датами', [
+            'start' => $start,
+            'end' => $end,
+        ]);
         http_response_code(422);
         echo json_encode(['error' => 'Некорректные даты'], JSON_UNESCAPED_UNICODE);
         return;
@@ -154,6 +206,9 @@ function handleSaveEvent(PDO $db): void
 
     $allowed = ['duty', 'important', 'vacation', 'trip', 'sick'];
     if (!in_array($type, $allowed, true)) {
+        log_warning('Попытка сохранить событие с неизвестным типом', [
+            'type' => $type,
+        ]);
         http_response_code(422);
         echo json_encode(['error' => 'Неизвестный тип события'], JSON_UNESCAPED_UNICODE);
         return;
@@ -169,6 +224,11 @@ function handleSaveEvent(PDO $db): void
     ]);
     $overlaps = (int) $stmt->fetchColumn();
     if ($overlaps > 0) {
+        log_warning('Попытка сохранить пересекающееся событие', [
+            'participant_id' => $participantId,
+            'start' => $start,
+            'end' => $end,
+        ]);
         http_response_code(409);
         echo json_encode(['error' => 'Событие пересекается с существующим'], JSON_UNESCAPED_UNICODE);
         return;
@@ -187,6 +247,10 @@ function handleSaveEvent(PDO $db): void
     $stmt->execute([':id' => $eventId]);
     $event = $stmt->fetch(PDO::FETCH_ASSOC);
 
+    log_info('Сохранено событие', [
+        'event' => $event,
+    ]);
+
     echo json_encode(['event' => $event], JSON_UNESCAPED_UNICODE);
 }
 
@@ -194,6 +258,9 @@ function handleDeleteEvent(PDO $db): void
 {
     $eventId = (int) ($_POST['id'] ?? 0);
     if ($eventId <= 0) {
+        log_warning('Попытка удалить событие с некорректным идентификатором', [
+            'id' => $eventId,
+        ]);
         http_response_code(422);
         echo json_encode(['error' => 'Некорректный идентификатор'], JSON_UNESCAPED_UNICODE);
         return;
@@ -201,6 +268,10 @@ function handleDeleteEvent(PDO $db): void
 
     $stmt = $db->prepare('DELETE FROM events WHERE id = :id');
     $stmt->execute([':id' => $eventId]);
+
+    log_info('Удалено событие', [
+        'id' => $eventId,
+    ]);
 
     echo json_encode(['success' => true], JSON_UNESCAPED_UNICODE);
 }
@@ -211,6 +282,13 @@ function handleAutoAssign(PDO $db): void
     $year = (int) ($_POST['year'] ?? date('Y'));
     $force = filter_var($_POST['force'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
+    log_info('Запрошено автоматическое распределение дежурств', [
+        'month' => $month,
+        'year' => $year,
+        'force' => $force,
+    ]);
+
+
     [$startDate, $endDate] = monthBounds($year, $month);
 
     $stmt = $db->prepare("SELECT COUNT(*) FROM events WHERE type = 'duty' AND date(start_date) BETWEEN :start AND :end");
@@ -218,6 +296,9 @@ function handleAutoAssign(PDO $db): void
     $existingCount = (int) $stmt->fetchColumn();
 
     if ($existingCount > 0 && !$force) {
+        log_info('Автораспределение дежурств требует подтверждения', [
+            'existing_duties' => $existingCount,
+        ]);
         echo json_encode(['needs_confirm' => true], JSON_UNESCAPED_UNICODE);
         return;
     }
@@ -225,10 +306,14 @@ function handleAutoAssign(PDO $db): void
     if ($existingCount > 0) {
         $del = $db->prepare("DELETE FROM events WHERE type = 'duty' AND date(start_date) BETWEEN :start AND :end");
         $del->execute([':start' => $startDate, ':end' => $endDate]);
+        log_info('Удалены существующие дежурства перед перераспределением', [
+            'count' => $existingCount,
+        ]);
     }
 
     $participants = fetchParticipants($db);
     if (empty($participants)) {
+        log_warning('Автораспределение не выполнено — нет участников');
         echo json_encode(['message' => 'Нет участников для распределения'], JSON_UNESCAPED_UNICODE);
         return;
     }
@@ -342,6 +427,11 @@ function handleAutoAssign(PDO $db): void
         $response['skipped'] = $skippedDays;
     }
 
+    log_info('Автораспределение завершено', [
+        'created' => count($createdEvents),
+        'skipped' => $skippedDays,
+    ]);
+
     echo json_encode($response, JSON_UNESCAPED_UNICODE);
 }
 
@@ -350,6 +440,11 @@ function handleGetStatistics(PDO $db): void
     $year = (int) ($_POST['year'] ?? date('Y'));
     $yearString = sprintf('%04d', $year);
     $participants = fetchParticipants($db);
+
+
+    log_info('Запрошена статистика', [
+        'year' => $year,
+    ]);
 
     $weekdayData = [];
     foreach ($participants as $participant) {

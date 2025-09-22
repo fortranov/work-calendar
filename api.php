@@ -6,6 +6,7 @@ header('Content-Type: application/json; charset=utf-8');
 $action = $_POST['action'] ?? null;
 
 if ($action === null) {
+
     log_warning('Получен запрос без указания действия', [
         'keys' => array_keys($_POST),
         'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
@@ -14,6 +15,7 @@ if ($action === null) {
     echo json_encode(['error' => 'Неизвестное действие'], JSON_UNESCAPED_UNICODE);
     exit;
 }
+
 
 log_info('Начало обработки API-запроса', [
     'action' => $action,
@@ -286,6 +288,7 @@ function handleAutoAssign(PDO $db): void
         'force' => $force,
     ]);
 
+
     [$startDate, $endDate] = monthBounds($year, $month);
 
     $stmt = $db->prepare("SELECT COUNT(*) FROM events WHERE type = 'duty' AND date(start_date) BETWEEN :start AND :end");
@@ -437,6 +440,7 @@ function handleGetStatistics(PDO $db): void
     $year = (int) ($_POST['year'] ?? date('Y'));
     $yearString = sprintf('%04d', $year);
     $participants = fetchParticipants($db);
+
 
     log_info('Запрошена статистика', [
         'year' => $year,

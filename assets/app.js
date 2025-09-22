@@ -7,10 +7,13 @@
     }
 
     function initCalendarPage() {
+        const LOCK_MESSAGE = 'Месяц утвержден. Редактирование недоступно.';
+
         const state = {
             month: new Date().getMonth() + 1,
             year: new Date().getFullYear(),
             editing: false,
+            locked: false,
             participants: [],
             events: [],
             pendingRange: null,
@@ -21,6 +24,7 @@
         const prevMonthBtn = document.getElementById('prev-month');
         const nextMonthBtn = document.getElementById('next-month');
         const editToggle = document.getElementById('edit-toggle');
+        const approvalToggle = document.getElementById('approval-toggle');
         const addParticipantBtn = document.getElementById('add-participant');
         const infoMessage = document.getElementById('info-message');
         const distributeBtn = document.getElementById('distribute');
@@ -29,9 +33,12 @@
         const eventMenu = document.getElementById('event-menu');
         const modal = createModal();
 
+        const editLabel = editToggle ? editToggle.closest('label') : null;
+        const approvalLabel = approvalToggle ? approvalToggle.closest('label') : null;
+
         const eventLabels = {
             duty: 'Х',
-            important: 'o',
+            important: 'о',
             vacation: 'Отпуск',
             trip: 'Командировка',
             sick: 'Больничный',
@@ -39,6 +46,7 @@
 
         const rangeTypes = ['vacation', 'trip', 'sick'];
 
+        updateControlsState();
         loadCalendar();
 
         prevMonthBtn.addEventListener('click', () => {
@@ -48,14 +56,53 @@
             changeMonth(1);
         });
         editToggle.addEventListener('change', (event) => {
+            if (state.locked) {
+                event.target.checked = false;
+                updateControlsState();
+                return;
+            }
+
             state.editing = event.target.checked;
             if (!state.editing) {
                 clearPendingRange();
                 hideEventMenu();
-                infoMessage.textContent = '';
+                if (infoMessage.textContent === LOCK_MESSAGE) {
+                    infoMessage.textContent = '';
+                }
             }
+
+            updateControlsState();
             renderCalendar();
         });
+        if (approvalToggle) {
+            approvalToggle.addEventListener('change', () => {
+                if (approvalToggle.disabled) {
+                    return;
+                }
+
+                const previousState = state.locked;
+                const targetState = approvalToggle.checked;
+                if (previousState === targetState) {
+                    return;
+                }
+
+                if (!targetState) {
+                    const password = requestPassword('Введите пароль для снятия утверждения');
+                    if (password === null) {
+                        approvalToggle.checked = previousState;
+                        return;
+                    }
+                    if (password === '') {
+                        infoMessage.textContent = 'Пароль не может быть пустым.';
+                        approvalToggle.checked = previousState;
+                        return;
+                    }
+                    setMonthApproval(false, password);
+                } else {
+                    setMonthApproval(true);
+                }
+            });
+        }
         addParticipantBtn.addEventListener('click', () => {
             if (!state.editing) return;
             const name = prompt('Введите фамилию участника');
@@ -89,6 +136,118 @@
             });
         });
 
+        function updateControlsState() {
+            if (editToggle) {
+                if (state.locked) {
+                    if (state.editing) {
+                        state.editing = false;
+                    }
+                    editToggle.checked = false;
+                    editToggle.disabled = true;
+                    if (editLabel) {
+                        editLabel.classList.add('disabled');
+                    }
+                } else {
+                    editToggle.disabled = false;
+                    if (editLabel) {
+                        editLabel.classList.remove('disabled');
+                    }
+                    editToggle.checked = state.editing;
+                }
+            }
+
+            if (approvalToggle && !approvalToggle.disabled) {
+                approvalToggle.checked = state.locked;
+            }
+
+            if (state.locked) {
+                if (!infoMessage.textContent || infoMessage.textContent === LOCK_MESSAGE) {
+                    infoMessage.textContent = LOCK_MESSAGE;
+                }
+            } else if (infoMessage.textContent === LOCK_MESSAGE) {
+                infoMessage.textContent = '';
+            }
+
+            const showEditingActions = state.editing && !state.locked;
+            [distributeBtn, clearDutiesBtn, addParticipantBtn].forEach((btn) => {
+                if (btn) {
+                    btn.classList.toggle('hidden', !showEditingActions);
+                }
+            });
+        }
+
+        function requestPassword(message) {
+            const input = prompt(message);
+            if (input === null) {
+                return null;
+            }
+            return input.trim();
+        }
+
+        function parseJsonResponse(response, defaultMessage) {
+            const contentType = response.headers.get('Content-Type') || '';
+            if (!response.ok) {
+                if (contentType.includes('application/json')) {
+                    return response.json().then((data) => {
+                        throw new Error(data.error || defaultMessage);
+                    });
+                }
+                throw new Error(defaultMessage);
+            }
+            return response.json();
+        }
+
+        function setMonthApproval(approved, password) {
+            if (!approvalToggle) {
+                return;
+            }
+
+            approvalToggle.disabled = true;
+            if (approvalLabel) {
+                approvalLabel.classList.add('disabled');
+            }
+
+            const formData = new FormData();
+            formData.append('action', 'set_month_approval');
+            formData.append('month', state.month);
+            formData.append('year', state.year);
+            formData.append('approved', approved ? 'true' : 'false');
+            if (typeof password === 'string') {
+                formData.append('password', password);
+            }
+
+            fetch('api.php', {
+                method: 'POST',
+                body: formData,
+            })
+                .then((response) => parseJsonResponse(response, 'Не удалось обновить статус месяца.'))
+                .then((data) => {
+                    state.locked = Boolean(data.locked);
+                    if (state.locked) {
+                        state.editing = false;
+                        clearPendingRange();
+                        hideEventMenu();
+                        infoMessage.textContent = LOCK_MESSAGE;
+                    } else {
+                        infoMessage.textContent = 'Редактирование снова доступно.';
+                    }
+                    approvalToggle.checked = state.locked;
+                    updateControlsState();
+                    renderCalendar();
+                })
+                .catch((error) => {
+                    infoMessage.textContent = error.message || 'Не удалось обновить статус месяца.';
+                    approvalToggle.checked = state.locked;
+                    updateControlsState();
+                })
+                .finally(() => {
+                    approvalToggle.disabled = false;
+                    if (approvalLabel) {
+                        approvalLabel.classList.remove('disabled');
+                    }
+                });
+        }
+
         function changeMonth(delta) {
             state.month += delta;
             if (state.month < 1) {
@@ -117,6 +276,16 @@
                 .then((data) => {
                     state.participants = data.participants || [];
                     state.events = data.events || [];
+                    const locked = Boolean(data.locked);
+                    if (locked !== state.locked) {
+                        state.locked = locked;
+                        if (state.locked) {
+                            state.editing = false;
+                            clearPendingRange();
+                            hideEventMenu();
+                        }
+                    }
+                    updateControlsState();
                     renderCalendar();
                 })
                 .catch(() => {
@@ -125,6 +294,7 @@
         }
 
         function renderCalendar() {
+            updateControlsState();
             const date = new Date(state.year, state.month - 1, 1);
             currentMonthEl.textContent = date.toLocaleString('ru-RU', {
                 month: 'long',
@@ -466,42 +636,47 @@
         }
 
         function handleAutoAssign() {
+            const password = requestPassword('Введите пароль для распределения дежурств');
+            if (password === null) {
+                return;
+            }
+            if (password === '') {
+                infoMessage.textContent = 'Пароль не может быть пустым.';
+                return;
+            }
+
+            infoMessage.textContent = 'Выполняется распределение дежурств…';
+            submitAutoAssign(password, false);
+        }
+
+        function submitAutoAssign(password, force) {
             const formData = new FormData();
             formData.append('action', 'auto_assign');
             formData.append('month', state.month);
             formData.append('year', state.year);
-            formData.append('force', 'false');
+            formData.append('force', force ? 'true' : 'false');
+            formData.append('password', password);
 
             fetch('api.php', {
                 method: 'POST',
                 body: formData,
             })
-                .then((response) => response.json())
+                .then((response) => parseJsonResponse(response, 'Не удалось распределить дежурства.'))
                 .then((data) => {
                     if (data.needs_confirm) {
+                        infoMessage.textContent = 'За выбранный месяц уже есть дежурства.';
                         modal.confirm('Перезаписать существующие дежурства?').then((confirmed) => {
                             if (!confirmed) return;
-                            const confirmData = new FormData();
-                            confirmData.append('action', 'auto_assign');
-                            confirmData.append('month', state.month);
-                            confirmData.append('year', state.year);
-                            confirmData.append('force', 'true');
-                            fetch('api.php', {
-                                method: 'POST',
-                                body: confirmData,
-                            })
-                                .then((response) => response.json())
-                                .then(handleAutoAssignResult)
-                                .catch(() => {
-                                    infoMessage.textContent = 'Не удалось распределить дежурства.';
-                                });
+                            infoMessage.textContent = 'Перераспределение дежурств…';
+                            submitAutoAssign(password, true);
                         });
-                    } else {
-                        handleAutoAssignResult(data);
+                        return;
                     }
+
+                    handleAutoAssignResult(data);
                 })
-                .catch(() => {
-                    infoMessage.textContent = 'Не удалось распределить дежурства.';
+                .catch((error) => {
+                    infoMessage.textContent = error.message || 'Не удалось распределить дежурства.';
                 });
         }
 
@@ -517,28 +692,27 @@
         function handleClearDuties() {
             modal.confirm('Удалить все дежурства за выбранный месяц?').then((confirmed) => {
                 if (!confirmed) return;
+                const password = requestPassword('Введите пароль для очистки дежурств');
+                if (password === null) {
+                    return;
+                }
+                if (password === '') {
+                    infoMessage.textContent = 'Пароль не может быть пустым.';
+                    return;
+                }
                 const formData = new FormData();
                 formData.append('action', 'clear_month_duties');
                 formData.append('month', state.month);
                 formData.append('year', state.year);
+                formData.append('password', password);
+
+                infoMessage.textContent = 'Очистка дежурств…';
 
                 fetch('api.php', {
                     method: 'POST',
                     body: formData,
                 })
-                    .then((response) => {
-                        if (!response.ok) {
-                            return response
-                                .json()
-                                .catch(() => {
-                                    throw new Error('Не удалось очистить дежурства.');
-                                })
-                                .then((data) => {
-                                    throw new Error(data.error || 'Не удалось очистить дежурства.');
-                                });
-                        }
-                        return response.json();
-                    })
+                    .then((response) => parseJsonResponse(response, 'Не удалось очистить дежурства.'))
                     .then((data) => {
                         const count = Number(data.cleared || 0);
                         infoMessage.textContent = count > 0

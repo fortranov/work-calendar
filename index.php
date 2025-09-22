@@ -34,6 +34,12 @@ $page = $page === 'stats' ? 'stats' : 'home';
                             Режим редактирования
                         </label>
                     </div>
+                    <div class="approval-toggle">
+                        <label>
+                            <input type="checkbox" id="approval-toggle">
+                            Утверждено
+                        </label>
+                    </div>
                     <div class="calendar-actions">
                         <button type="button" id="distribute" class="primary-button">Распределить</button>
                         <button type="button" id="clear-duty" class="danger-button">Очистить</button>

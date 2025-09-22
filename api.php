@@ -1,6 +1,8 @@
 <?php
 require __DIR__ . '/db.php';
 
+const DEFAULT_EDIT_PASSWORD = '12345';
+
 header('Content-Type: application/json; charset=utf-8');
 
 $action = $_POST['action'] ?? null;
@@ -54,6 +56,9 @@ try {
         case 'generate_report':
             handleGenerateReport($db);
             break;
+        case 'set_month_approval':
+            handleSetMonthApproval($db);
+            break;
         default:
             log_warning('Запрошено неизвестное действие', [
                 'action' => $action,
@@ -99,6 +104,7 @@ function handleGetCalendar(PDO $db): void
         'events' => $events,
         'month' => $month,
         'year' => $year,
+        'locked' => isMonthLocked($db, $year, $month),
     ], JSON_UNESCAPED_UNICODE);
 }
 
@@ -208,6 +214,17 @@ function handleSaveEvent(PDO $db): void
         return;
     }
 
+    $lockedMonths = getLockedMonthsInRange($db, $start, $end);
+    if (!empty($lockedMonths)) {
+        log_warning('Попытка сохранить событие в утверждённом месяце', [
+            'participant_id' => $participantId,
+            'start' => $start,
+            'end' => $end,
+        ]);
+        respondLocked($lockedMonths);
+        return;
+    }
+
     $allowed = ['duty', 'important', 'vacation', 'trip', 'sick'];
     if (!in_array($type, $allowed, true)) {
         log_warning('Попытка сохранить событие с неизвестным типом', [
@@ -270,6 +287,23 @@ function handleDeleteEvent(PDO $db): void
         return;
     }
 
+    $eventStmt = $db->prepare('SELECT start_date, end_date, participant_id, type FROM events WHERE id = :id');
+    $eventStmt->execute([':id' => $eventId]);
+    $event = $eventStmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($event) {
+        $lockedMonths = getLockedMonthsInRange($db, $event['start_date'], $event['end_date']);
+        if (!empty($lockedMonths)) {
+            log_warning('Попытка удалить событие из утверждённого месяца', [
+                'id' => $eventId,
+                'participant_id' => (int) $event['participant_id'],
+                'type' => $event['type'],
+            ]);
+            respondLocked($lockedMonths);
+            return;
+        }
+    }
+
     $stmt = $db->prepare('DELETE FROM events WHERE id = :id');
     $stmt->execute([':id' => $eventId]);
 
@@ -291,6 +325,22 @@ function handleAutoAssign(PDO $db): void
         'year' => $year,
         'force' => $force,
     ]);
+
+    if (isMonthLocked($db, $year, $month)) {
+        log_warning('Автораспределение недоступно для утверждённого месяца', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+        respondLocked([[
+            'year' => $year,
+            'month' => $month,
+        ]]);
+        return;
+    }
+
+    if (!requireValidPassword($_POST['password'] ?? null, 'auto_assign')) {
+        return;
+    }
 
     [$startDate, $endDate] = monthBounds($year, $month);
 
@@ -475,6 +525,22 @@ function handleClearMonthDuties(PDO $db): void
         'year' => $year,
     ]);
 
+    if (isMonthLocked($db, $year, $month)) {
+        log_warning('Удаление дежурств недоступно для утверждённого месяца', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+        respondLocked([[
+            'year' => $year,
+            'month' => $month,
+        ]]);
+        return;
+    }
+
+    if (!requireValidPassword($_POST['password'] ?? null, 'clear_month_duties')) {
+        return;
+    }
+
     $countStmt = $db->prepare(
         "SELECT COUNT(*) FROM events WHERE type = 'duty' AND date(start_date) BETWEEN :start AND :end"
     );
@@ -508,6 +574,39 @@ function handleClearMonthDuties(PDO $db): void
     ]);
 
     echo json_encode(['cleared' => $existing], JSON_UNESCAPED_UNICODE);
+}
+
+function handleSetMonthApproval(PDO $db): void
+{
+    $month = max(1, min(12, (int) ($_POST['month'] ?? date('n'))));
+    $year = (int) ($_POST['year'] ?? date('Y'));
+    $approved = filter_var($_POST['approved'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+    log_info('Изменение статуса утверждения месяца', [
+        'month' => $month,
+        'year' => $year,
+        'approved' => $approved,
+    ]);
+
+    if (!$approved && !requireValidPassword($_POST['password'] ?? null, 'set_month_approval')) {
+        return;
+    }
+
+    setMonthLocked($db, $year, $month, $approved);
+
+    if ($approved) {
+        log_info('Месяц утверждён', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+    } else {
+        log_info('Утверждение месяца снято', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+    }
+
+    echo json_encode(['locked' => isMonthLocked($db, $year, $month)], JSON_UNESCAPED_UNICODE);
 }
 
 function handleGetStatistics(PDO $db): void
@@ -714,6 +813,111 @@ function handleGenerateReport(PDO $db): void
     ]);
 
     exit;
+}
+
+function getEditPassword(): string
+{
+    $password = getenv('APP_EDIT_PASSWORD');
+    if ($password !== false && $password !== '') {
+        return (string) $password;
+    }
+
+    return DEFAULT_EDIT_PASSWORD;
+}
+
+function isPasswordValid(?string $value): bool
+{
+    $expected = (string) getEditPassword();
+    $provided = trim((string) $value);
+
+    if ($expected === '') {
+        return $provided === '';
+    }
+
+    return hash_equals($expected, $provided);
+}
+
+function requireValidPassword(?string $value, string $action): bool
+{
+    if (!isPasswordValid($value)) {
+        log_warning('Неверный пароль для действия', [
+            'action' => $action,
+        ]);
+        http_response_code(403);
+        echo json_encode(['error' => 'Неверный пароль'], JSON_UNESCAPED_UNICODE);
+        return false;
+    }
+
+    return true;
+}
+
+function isMonthLocked(PDO $db, int $year, int $month): bool
+{
+    $stmt = $db->prepare('SELECT approved FROM approvals WHERE year = :year AND month = :month LIMIT 1');
+    $stmt->execute([
+        ':year' => $year,
+        ':month' => $month,
+    ]);
+
+    return (bool) $stmt->fetchColumn();
+}
+
+function setMonthLocked(PDO $db, int $year, int $month, bool $locked): void
+{
+    $stmt = $db->prepare(
+        'INSERT INTO approvals (year, month, approved, approved_at)
+         VALUES (:year, :month, :approved, CASE WHEN :approved = 1 THEN CURRENT_TIMESTAMP ELSE NULL END)
+         ON CONFLICT(year, month) DO UPDATE SET
+            approved = excluded.approved,
+            approved_at = CASE WHEN excluded.approved = 1 THEN CURRENT_TIMESTAMP ELSE NULL END'
+    );
+    $stmt->execute([
+        ':year' => $year,
+        ':month' => $month,
+        ':approved' => $locked ? 1 : 0,
+    ]);
+}
+
+function getLockedMonthsInRange(PDO $db, string $start, string $end): array
+{
+    $startDate = DateTimeImmutable::createFromFormat('Y-m-d', $start);
+    $endDate = DateTimeImmutable::createFromFormat('Y-m-d', $end);
+    if (!$startDate || !$endDate) {
+        return [];
+    }
+
+    $cursor = new DateTimeImmutable($startDate->format('Y-m-01'));
+    $endCursor = new DateTimeImmutable($endDate->format('Y-m-01'));
+    $locked = [];
+
+    while ($cursor <= $endCursor) {
+        $year = (int) $cursor->format('Y');
+        $month = (int) $cursor->format('n');
+        if (isMonthLocked($db, $year, $month)) {
+            $locked[] = ['year' => $year, 'month' => $month];
+        }
+        $cursor = $cursor->modify('+1 month');
+    }
+
+    return $locked;
+}
+
+function respondLocked(array $lockedMonths): void
+{
+    http_response_code(423);
+
+    if (!empty($lockedMonths)) {
+        $first = $lockedMonths[0];
+        $message = sprintf(
+            'Месяц %s %d утвержден и недоступен для редактирования.',
+            monthNameRu((int) $first['month']),
+            (int) $first['year']
+        );
+    } else {
+        $message = 'Месяц утвержден и недоступен для редактирования.';
+    }
+
+    echo json_encode(['error' => $message], JSON_UNESCAPED_UNICODE);
 }
 
 function fetchParticipants(PDO $db): array

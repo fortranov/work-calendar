@@ -132,7 +132,7 @@ a {
     gap: 1.75rem;
     align-items: center;
     width: 100%;
-    grid-template-columns: minmax(260px, 1.1fr) minmax(200px, 0.8fr) minmax(280px, 1fr);
+    grid-template-columns: minmax(260px, 1.1fr) minmax(200px, 0.7fr) minmax(200px, 0.7fr) minmax(300px, 1fr);
 }
 
 .month-switcher {
@@ -220,7 +220,8 @@ a {
     transform: translateY(-1px);
 }
 
-.toggle-edit label {
+.toggle-edit label,
+.approval-toggle label {
     display: inline-flex;
     align-items: center;
     gap: 0.6rem;
@@ -233,10 +234,22 @@ a {
     box-shadow: var(--shadow-sm);
 }
 
-.toggle-edit input {
+.toggle-edit,
+.approval-toggle {
+    justify-self: center;
+}
+
+.toggle-edit input,
+.approval-toggle input {
     width: 1.2rem;
     height: 1.2rem;
     accent-color: var(--accent);
+}
+
+.toggle-edit label.disabled,
+.approval-toggle label.disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .calendar-actions {

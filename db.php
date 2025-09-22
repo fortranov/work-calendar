@@ -154,6 +154,16 @@ function initializeDatabase(PDO $pdo, bool $isNew): void
         )'
     );
 
+    $pdo->exec(
+        'CREATE TABLE IF NOT EXISTS approvals (
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            approved INTEGER NOT NULL DEFAULT 0,
+            approved_at TEXT,
+            PRIMARY KEY (year, month)
+        )'
+    );
+
     if ($isNew) {
         log_info('Создаётся новая база данных, выполняется заполнение данными по умолчанию');
         seedParticipants($pdo);

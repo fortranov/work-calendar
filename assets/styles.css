@@ -56,20 +56,19 @@ a {
 }
 
 .site-header {
-    padding: 1.5rem 1rem 1rem;
+    padding: 1.5rem clamp(1rem, 5vw, 3.5rem) 1.2rem;
 }
 
 .top-nav {
     display: flex;
     justify-content: center;
     gap: 1rem;
-    padding: 0.6rem;
-    border-radius: 16px;
+    width: 100%;
+    padding: 0.75rem clamp(1.25rem, 4vw, 3.5rem);
+    border-radius: 20px;
     background: var(--surface);
     backdrop-filter: blur(20px);
     box-shadow: var(--shadow-sm);
-    margin: 0 auto;
-    width: min(1100px, 100%);
 }
 
 .nav-link {
@@ -89,24 +88,27 @@ a {
 }
 
 .page-content {
-    width: min(1100px, 100%);
-    margin: 0 auto;
-    padding: 1rem 1.5rem 3rem;
+    width: 100%;
+    margin: 0;
+    padding: 0 clamp(1.75rem, 5vw, 4rem) 3.5rem;
     display: flex;
     flex-direction: column;
-    gap: 2rem;
+    gap: 2.5rem;
 }
 
 .calendar-section,
 .stats-section {
     background: var(--surface);
     border: 1px solid var(--border-light);
-    border-radius: 24px;
-    padding: 2rem;
+    border-radius: 28px;
+    padding: clamp(1.8rem, 4vw, 3.2rem);
     box-shadow: var(--shadow-lg);
     backdrop-filter: blur(26px);
     position: relative;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 1.75rem;
 }
 
 .calendar-section::before,
@@ -127,9 +129,10 @@ a {
 
 .calendar-controls {
     display: grid;
-    gap: 1.5rem;
+    gap: 1.75rem;
     align-items: center;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    width: 100%;
+    grid-template-columns: minmax(260px, 1.1fr) minmax(200px, 0.8fr) minmax(280px, 1fr);
 }
 
 .month-switcher {
@@ -227,6 +230,7 @@ a {
     gap: 0.75rem;
     flex-wrap: wrap;
     justify-content: flex-end;
+    width: 100%;
 }
 
 .info-message {
@@ -474,7 +478,8 @@ a {
     display: flex;
     gap: 1rem;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: space-between;
+    width: 100%;
 }
 
 .stats-controls label {
@@ -547,11 +552,16 @@ a {
 
 @media (max-width: 1024px) {
     .calendar-controls {
-        grid-template-columns: 1fr;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     }
 
     .calendar-actions {
         justify-content: flex-start;
+    }
+
+    .stats-controls {
+        flex-direction: column;
+        align-items: flex-start;
     }
 }
 

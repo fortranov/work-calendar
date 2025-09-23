@@ -1009,29 +1009,81 @@ function createReportTempFile(): string
             continue;
         }
 
-        $tmp = @tempnam($dir, 'duty_report_');
-        if ($tmp !== false) {
-            log_info('Создан временный файл для отчета', [
-                'directory' => $dir,
-                'file' => $tmp,
-            ]);
-            return $tmp;
-        }
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $candidate = $dir . DIRECTORY_SEPARATOR . generateReportFileName();
 
-        log_warning('Не удалось создать временный файл в каталоге для отчета', [
-            'directory' => $dir,
-        ]);
+            $handle = @fopen($candidate, 'xb');
+            if ($handle === false) {
+                if (file_exists($candidate)) {
+                    continue;
+                }
+
+                log_warning('Не удалось зарезервировать файл для отчета', [
+                    'directory' => $dir,
+                    'path' => $candidate,
+                ]);
+                break;
+            }
+
+            fclose($handle);
+
+            log_info('Зарезервирован файл для отчета', [
+                'directory' => $dir,
+                'file' => $candidate,
+            ]);
+
+            return $candidate;
+        }
     }
 
     throw new RuntimeException('Не удалось создать временный файл для отчета');
 }
 
+function generateReportFileName(): string
+{
+    $timestamp = date('Ymd_His');
+
+    try {
+        $random = bin2hex(random_bytes(6));
+    } catch (Throwable $e) {
+        $random = substr(md5(uniqid((string) getmypid(), true)), 0, 12);
+    }
+
+    return sprintf('duty_report_%s_%s.docx', $timestamp, $random);
+}
+
 function buildReportDocumentXml(string $title, array $headers, array $rows): string
 {
+    $columnCount = max(1, count($headers));
+    $tableWidthTwips = 14500; // ширина страницы за вычетом полей в twips
+    $firstColumnWidth = 3200;
+    if ($columnCount === 1) {
+        $columnWidths = [$tableWidthTwips];
+    } else {
+        $remainingWidth = max($tableWidthTwips - $firstColumnWidth, 2000);
+        $otherColumnCount = $columnCount - 1;
+        $baseWidth = intdiv($remainingWidth, $otherColumnCount);
+        $columnWidths = [$firstColumnWidth];
+
+        for ($i = 0; $i < $otherColumnCount; $i++) {
+            $columnWidths[] = $baseWidth;
+        }
+
+        $allocated = array_sum($columnWidths);
+        $delta = $tableWidthTwips - $allocated;
+        if ($delta !== 0) {
+            $columnWidths[count($columnWidths) - 1] += $delta;
+        }
+    }
+
+    $lastColumnWidth = $columnWidths[count($columnWidths) - 1];
+
     $table = '<w:tbl>'
         . '<w:tblPr>'
         . '<w:tblStyle w:val="TableGrid"/>'
-        . '<w:tblW w:w="0" w:type="auto"/>'
+        . '<w:tblW w:w="' . $tableWidthTwips . '" w:type="dxa"/>'
+        . '<w:tblLayout w:type="Fixed"/>'
+        . '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="0"/>'
         . '<w:tblBorders>'
         . '<w:top w:val="single" w:sz="8" w:space="0" w:color="auto"/>'
         . '<w:left w:val="single" w:sz="8" w:space="0" w:color="auto"/>'
@@ -1043,15 +1095,16 @@ function buildReportDocumentXml(string $title, array $headers, array $rows): str
         . '</w:tblPr>'
         . '<w:tblGrid>';
 
-    foreach ($headers as $_) {
-        $table .= '<w:gridCol w:w="0"/>';
+    foreach ($columnWidths as $width) {
+        $table .= '<w:gridCol w:w="' . $width . '"/>';
     }
     $table .= '</w:tblGrid>';
 
     $table .= '<w:tr><w:trPr><w:tblHeader/></w:trPr>';
     foreach ($headers as $index => $headerText) {
         $alignment = $index === 0 ? 'left' : 'center';
-        $table .= buildTableCellXml((string) $headerText, true, $alignment, true);
+        $width = $columnWidths[$index] ?? $lastColumnWidth;
+        $table .= buildTableCellXml((string) $headerText, true, $alignment, true, $width);
     }
     $table .= '</w:tr>';
 
@@ -1059,7 +1112,8 @@ function buildReportDocumentXml(string $title, array $headers, array $rows): str
         $table .= '<w:tr>';
         foreach ($row as $index => $cellText) {
             $alignment = $index === 0 ? 'left' : 'center';
-            $table .= buildTableCellXml((string) $cellText, false, $alignment, false);
+            $width = $columnWidths[$index] ?? $lastColumnWidth;
+            $table .= buildTableCellXml((string) $cellText, false, $alignment, false, $width);
         }
         $table .= '</w:tr>';
     }
@@ -1091,33 +1145,27 @@ function buildReportDocumentXml(string $title, array $headers, array $rows): str
         . '</w:document>';
 }
 
-function buildTableCellXml(string $text, bool $bold, ?string $alignment, bool $highlightHeader): string
+function buildTableCellXml(string $text, bool $bold, ?string $alignment, bool $highlightHeader, int $width): string
 {
-    $tcPr = '';
+    $tcPrParts = ['<w:tcW w:w="' . $width . '" w:type="dxa"/>'];
     if ($highlightHeader) {
-        $tcPr = '<w:tcPr>'
-            . '<w:shd w:val="clear" w:color="auto" w:fill="E2E8F0"/>'
-            . '</w:tcPr>';
+        $tcPrParts[] = '<w:shd w:val="clear" w:color="auto" w:fill="E2E8F0"/>';
     }
 
-    $paragraph = '';
+    $tcPr = '<w:tcPr>' . implode('', $tcPrParts) . '</w:tcPr>';
+
+    $pPr = '';
     if ($alignment !== null) {
-        $paragraph .= '<w:pPr><w:jc w:val="' . $alignment . '"/></w:pPr>';
+        $pPr = '<w:pPr><w:jc w:val="' . $alignment . '"/></w:pPr>';
     }
 
-    $run = '<w:r>';
-    if ($bold) {
-        $run .= '<w:rPr><w:b/><w:bCs/></w:rPr>';
-    }
     $escaped = docxEscape($text);
-    if ($escaped === '') {
-        $run .= '<w:t/>';
-    } else {
-        $run .= '<w:t xml:space="preserve">' . $escaped . '</w:t>';
-    }
-    $run .= '</w:r>';
+    $runProps = $bold ? '<w:rPr><w:b/><w:bCs/></w:rPr>' : '';
+    $textNode = $escaped === ''
+        ? '<w:t/>'
+        : '<w:t xml:space="preserve">' . $escaped . '</w:t>';
 
-    return '<w:tc>' . $tcPr . '<w:p>' . $paragraph . $run . '</w:p></w:tc>';
+    return '<w:tc>' . $tcPr . '<w:p>' . $pPr . '<w:r>' . $runProps . $textNode . '</w:r></w:p></w:tc>';
 }
 
 function docxEscape(string $text): string

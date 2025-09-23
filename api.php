@@ -1,0 +1,1391 @@
+<?php
+require __DIR__ . '/db.php';
+
+const DEFAULT_EDIT_PASSWORD = '12345';
+
+header('Content-Type: application/json; charset=utf-8');
+
+$action = $_POST['action'] ?? null;
+
+if ($action === null) {
+    log_warning('Получен запрос без указания действия', [
+        'keys' => array_keys($_POST),
+        'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+    ]);
+    http_response_code(400);
+    echo json_encode(['error' => 'Неизвестное действие'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+log_info('Начало обработки API-запроса', [
+    'action' => $action,
+    'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+]);
+
+try {
+    $db = get_db();
+
+    switch ($action) {
+        case 'get_calendar':
+            handleGetCalendar($db);
+            break;
+        case 'add_participant':
+            handleAddParticipant($db);
+            break;
+        case 'delete_participant':
+            handleDeleteParticipant($db);
+            break;
+        case 'reorder_participants':
+            handleReorderParticipants($db);
+            break;
+        case 'save_event':
+            handleSaveEvent($db);
+            break;
+        case 'delete_event':
+            handleDeleteEvent($db);
+            break;
+        case 'auto_assign':
+            handleAutoAssign($db);
+            break;
+        case 'clear_month_duties':
+            handleClearMonthDuties($db);
+            break;
+        case 'get_statistics':
+            handleGetStatistics($db);
+            break;
+        case 'generate_report':
+            handleGenerateReport($db);
+            break;
+        case 'set_month_approval':
+            handleSetMonthApproval($db);
+            break;
+        default:
+            log_warning('Запрошено неизвестное действие', [
+                'action' => $action,
+            ]);
+            http_response_code(400);
+            echo json_encode(['error' => 'Неизвестное действие'], JSON_UNESCAPED_UNICODE);
+            break;
+    }
+} catch (Throwable $e) {
+    log_error('Ошибка при обработке API-запроса', [
+        'action' => $action,
+        'error' => $e->getMessage(),
+    ]);
+    http_response_code(500);
+    echo json_encode([
+        'error' => 'Произошла ошибка',
+        'details' => $e->getMessage(),
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+function handleGetCalendar(PDO $db): void
+{
+    $month = max(1, min(12, (int) ($_POST['month'] ?? date('n'))));
+    $year = (int) ($_POST['year'] ?? date('Y'));
+
+    log_info('Запрошен календарь', [
+        'month' => $month,
+        'year' => $year,
+    ]);
+
+    $participants = fetchParticipants($db);
+    [$startDate, $endDate] = monthBounds($year, $month);
+
+    $stmt = $db->prepare('SELECT * FROM events WHERE NOT (date(end_date) < :start OR date(start_date) > :end)');
+    $stmt->execute([
+        ':start' => $startDate,
+        ':end' => $endDate,
+    ]);
+    $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    echo json_encode([
+        'participants' => $participants,
+        'events' => $events,
+        'month' => $month,
+        'year' => $year,
+        'locked' => isMonthLocked($db, $year, $month),
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+function handleAddParticipant(PDO $db): void
+{
+    $name = trim((string) ($_POST['name'] ?? ''));
+    if ($name === '') {
+        log_warning('Попытка добавить участника с пустым именем');
+        http_response_code(422);
+        echo json_encode(['error' => 'Имя не может быть пустым'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $maxSort = (int) $db->query('SELECT COALESCE(MAX(sort_order), 0) FROM participants')->fetchColumn();
+    $stmt = $db->prepare('INSERT INTO participants (name, sort_order) VALUES (:name, :sort)');
+    $stmt->execute([
+        ':name' => $name,
+        ':sort' => $maxSort + 1,
+    ]);
+
+    $id = (int) $db->lastInsertId();
+    log_info('Добавлен новый участник', [
+        'id' => $id,
+        'name' => $name,
+    ]);
+
+    echo json_encode(['participant' => ['id' => $id, 'name' => $name]], JSON_UNESCAPED_UNICODE);
+}
+
+function handleDeleteParticipant(PDO $db): void
+{
+    $id = (int) ($_POST['id'] ?? 0);
+    if ($id <= 0) {
+        log_warning('Попытка удалить участника с некорректным идентификатором', [
+            'id' => $id,
+        ]);
+        http_response_code(422);
+        echo json_encode(['error' => 'Некорректный идентификатор'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $stmt = $db->prepare('DELETE FROM participants WHERE id = :id');
+    $stmt->execute([':id' => $id]);
+
+    log_info('Удалён участник', [
+        'id' => $id,
+    ]);
+
+    echo json_encode(['success' => true], JSON_UNESCAPED_UNICODE);
+}
+
+function handleReorderParticipants(PDO $db): void
+{
+    $order = $_POST['order'] ?? [];
+    if (!is_array($order)) {
+        log_warning('Попытка изменить порядок участников с некорректными данными');
+        http_response_code(422);
+        echo json_encode(['error' => 'Некорректный формат'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $stmt = $db->prepare('UPDATE participants SET sort_order = :sort WHERE id = :id');
+    foreach ($order as $index => $id) {
+        $stmt->execute([
+            ':sort' => $index,
+            ':id' => (int) $id,
+        ]);
+    }
+
+    log_info('Обновлён порядок участников', [
+        'order' => array_values(array_map('intval', $order)),
+    ]);
+
+    echo json_encode(['success' => true], JSON_UNESCAPED_UNICODE);
+}
+
+function handleSaveEvent(PDO $db): void
+{
+    $participantId = (int) ($_POST['participant_id'] ?? 0);
+    $type = trim((string) ($_POST['type'] ?? ''));
+    $start = (string) ($_POST['start_date'] ?? '');
+    $end = (string) ($_POST['end_date'] ?? '');
+
+    if ($participantId <= 0 || $type === '' || $start === '') {
+        log_warning('Попытка сохранить событие с неполными данными', [
+            'participant_id' => $participantId,
+            'type' => $type,
+            'start' => $start,
+            'end' => $end,
+        ]);
+        http_response_code(422);
+        echo json_encode(['error' => 'Недостаточно данных'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    if ($end === '') {
+        $end = $start;
+    }
+
+    if (!validateDate($start) || !validateDate($end) || $end < $start) {
+        log_warning('Попытка сохранить событие с некорректными датами', [
+            'start' => $start,
+            'end' => $end,
+        ]);
+        http_response_code(422);
+        echo json_encode(['error' => 'Некорректные даты'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $lockedMonths = getLockedMonthsInRange($db, $start, $end);
+    if (!empty($lockedMonths)) {
+        log_warning('Попытка сохранить событие в утверждённом месяце', [
+            'participant_id' => $participantId,
+            'start' => $start,
+            'end' => $end,
+        ]);
+        respondLocked($lockedMonths);
+        return;
+    }
+
+    $allowed = ['duty', 'important', 'vacation', 'trip', 'sick'];
+    if (!in_array($type, $allowed, true)) {
+        log_warning('Попытка сохранить событие с неизвестным типом', [
+            'type' => $type,
+        ]);
+        http_response_code(422);
+        echo json_encode(['error' => 'Неизвестный тип события'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $stmt = $db->prepare(
+        'SELECT COUNT(*) FROM events WHERE participant_id = :pid AND NOT (date(end_date) < :start OR date(start_date) > :end)'
+    );
+    $stmt->execute([
+        ':pid' => $participantId,
+        ':start' => $start,
+        ':end' => $end,
+    ]);
+    $overlaps = (int) $stmt->fetchColumn();
+    if ($overlaps > 0) {
+        log_warning('Попытка сохранить пересекающееся событие', [
+            'participant_id' => $participantId,
+            'start' => $start,
+            'end' => $end,
+        ]);
+        http_response_code(409);
+        echo json_encode(['error' => 'Событие пересекается с существующим'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $stmt = $db->prepare('INSERT INTO events (participant_id, type, start_date, end_date) VALUES (:pid, :type, :start, :end)');
+    $stmt->execute([
+        ':pid' => $participantId,
+        ':type' => $type,
+        ':start' => $start,
+        ':end' => $end,
+    ]);
+
+    $eventId = (int) $db->lastInsertId();
+    $stmt = $db->prepare('SELECT * FROM events WHERE id = :id');
+    $stmt->execute([':id' => $eventId]);
+    $event = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    log_info('Сохранено событие', [
+        'event' => $event,
+    ]);
+
+    echo json_encode(['event' => $event], JSON_UNESCAPED_UNICODE);
+}
+
+function handleDeleteEvent(PDO $db): void
+{
+    $eventId = (int) ($_POST['id'] ?? 0);
+    if ($eventId <= 0) {
+        log_warning('Попытка удалить событие с некорректным идентификатором', [
+            'id' => $eventId,
+        ]);
+        http_response_code(422);
+        echo json_encode(['error' => 'Некорректный идентификатор'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $eventStmt = $db->prepare('SELECT start_date, end_date, participant_id, type FROM events WHERE id = :id');
+    $eventStmt->execute([':id' => $eventId]);
+    $event = $eventStmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($event) {
+        $lockedMonths = getLockedMonthsInRange($db, $event['start_date'], $event['end_date']);
+        if (!empty($lockedMonths)) {
+            log_warning('Попытка удалить событие из утверждённого месяца', [
+                'id' => $eventId,
+                'participant_id' => (int) $event['participant_id'],
+                'type' => $event['type'],
+            ]);
+            respondLocked($lockedMonths);
+            return;
+        }
+    }
+
+    $stmt = $db->prepare('DELETE FROM events WHERE id = :id');
+    $stmt->execute([':id' => $eventId]);
+
+    log_info('Удалено событие', [
+        'id' => $eventId,
+    ]);
+
+    echo json_encode(['success' => true], JSON_UNESCAPED_UNICODE);
+}
+
+function handleAutoAssign(PDO $db): void
+{
+    $month = max(1, min(12, (int) ($_POST['month'] ?? date('n'))));
+    $year = (int) ($_POST['year'] ?? date('Y'));
+    $force = filter_var($_POST['force'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+    log_info('Запрошено автоматическое распределение дежурств', [
+        'month' => $month,
+        'year' => $year,
+        'force' => $force,
+    ]);
+
+    if (isMonthLocked($db, $year, $month)) {
+        log_warning('Автораспределение недоступно для утверждённого месяца', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+        respondLocked([[
+            'year' => $year,
+            'month' => $month,
+        ]]);
+        return;
+    }
+
+    if (!requireValidPassword($_POST['password'] ?? null, 'auto_assign')) {
+        return;
+    }
+
+    [$startDate, $endDate] = monthBounds($year, $month);
+
+    $stmt = $db->prepare("SELECT COUNT(*) FROM events WHERE type = 'duty' AND date(start_date) BETWEEN :start AND :end");
+    $stmt->execute([':start' => $startDate, ':end' => $endDate]);
+    $existingCount = (int) $stmt->fetchColumn();
+
+    if ($existingCount > 0 && !$force) {
+        log_info('Автораспределение дежурств требует подтверждения', [
+            'existing_duties' => $existingCount,
+        ]);
+        echo json_encode(['needs_confirm' => true], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    if ($existingCount > 0) {
+        $del = $db->prepare("DELETE FROM events WHERE type = 'duty' AND date(start_date) BETWEEN :start AND :end");
+        $del->execute([':start' => $startDate, ':end' => $endDate]);
+        log_info('Удалены существующие дежурства перед перераспределением', [
+            'count' => $existingCount,
+        ]);
+    }
+
+    $participants = fetchParticipants($db);
+    if (empty($participants)) {
+        log_warning('Автораспределение не выполнено — нет участников');
+        echo json_encode(['message' => 'Нет участников для распределения'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $countsStmt = $db->prepare(
+        "SELECT participant_id, strftime('%w', start_date) AS weekday, COUNT(*) AS cnt
+         FROM events
+         WHERE type = 'duty' AND strftime('%Y', start_date) = :year
+         GROUP BY participant_id, weekday"
+    );
+    $countsStmt->execute([':year' => sprintf('%04d', $year)]);
+    $weekdayCounts = [];
+    foreach ($participants as $participant) {
+        $weekdayCounts[$participant['id']] = array_fill(0, 7, 0);
+    }
+    while ($row = $countsStmt->fetch(PDO::FETCH_ASSOC)) {
+        $pid = (int) $row['participant_id'];
+        $weekdayCounts[$pid][(int) $row['weekday']] = (int) $row['cnt'];
+    }
+
+    $totalCounts = [];
+    foreach ($weekdayCounts as $pid => $counts) {
+        $totalCounts[$pid] = array_sum($counts);
+    }
+
+    $eventsStmt = $db->prepare(
+        'SELECT * FROM events WHERE type <> :duty AND NOT (date(end_date) < :start OR date(start_date) > :end)'
+    );
+    $eventsStmt->execute([
+        ':duty' => 'duty',
+        ':start' => $startDate,
+        ':end' => $endDate,
+    ]);
+    $blocking = [];
+    while ($event = $eventsStmt->fetch(PDO::FETCH_ASSOC)) {
+        $pid = (int) $event['participant_id'];
+        if (!isset($blocking[$pid])) {
+            $blocking[$pid] = [];
+        }
+        $start = new DateTime($event['start_date']);
+        $end = new DateTime($event['end_date']);
+        for ($cursor = clone $start; $cursor <= $end; $cursor->modify('+1 day')) {
+            $dateKey = $cursor->format('Y-m-d');
+            if ($dateKey < $startDate || $dateKey > $endDate) {
+                continue;
+            }
+            $blocking[$pid][$dateKey] = $event['type'];
+        }
+    }
+
+    $lastDutyStmt = $db->prepare(
+        "SELECT participant_id, start_date FROM events WHERE type = 'duty' AND date(start_date) < :start ORDER BY date(start_date) DESC LIMIT 1"
+    );
+    $lastDutyStmt->execute([':start' => $startDate]);
+    $lastAssignedParticipant = null;
+    $lastAssignedDate = null;
+    if ($prev = $lastDutyStmt->fetch(PDO::FETCH_ASSOC)) {
+        $lastAssignedParticipant = (int) $prev['participant_id'];
+        $lastAssignedDate = $prev['start_date'];
+    }
+
+    $daysInMonth = (int) (new DateTimeImmutable($startDate))->format('t');
+    $insertStmt = $db->prepare('INSERT INTO events (participant_id, type, start_date, end_date) VALUES (:pid, :type, :start, :end)');
+    $createdEvents = [];
+    $skippedDays = [];
+
+    for ($day = 1; $day <= $daysInMonth; $day++) {
+        $dateObj = DateTimeImmutable::createFromFormat('Y-m-d', sprintf('%04d-%02d-%02d', $year, $month, $day));
+        if ($dateObj === false) {
+            continue;
+        }
+        $dateKey = $dateObj->format('Y-m-d');
+        $weekday = (int) $dateObj->format('w');
+
+        $available = [];
+        foreach ($participants as $participant) {
+            $pid = (int) $participant['id'];
+            if (isset($blocking[$pid][$dateKey])) {
+                continue;
+            }
+            $available[] = $pid;
+        }
+
+        if (empty($available)) {
+            $skippedDays[] = $dateKey;
+            continue;
+        }
+
+        $candidates = $available;
+        if ($lastAssignedParticipant !== null && $lastAssignedDate !== null && areConsecutiveDates($lastAssignedDate, $dateKey)) {
+            $candidates = array_values(array_filter(
+                $candidates,
+                static fn($pid) => $pid !== $lastAssignedParticipant
+            ));
+        }
+
+        if (empty($candidates)) {
+            $skippedDays[] = $dateKey;
+            continue;
+        }
+
+        usort($candidates, function ($a, $b) use ($weekdayCounts, $weekday, $totalCounts) {
+            $weekdayDiff = $weekdayCounts[$a][$weekday] <=> $weekdayCounts[$b][$weekday];
+            if ($weekdayDiff !== 0) {
+                return $weekdayDiff;
+            }
+            $totalDiff = $totalCounts[$a] <=> $totalCounts[$b];
+            if ($totalDiff !== 0) {
+                return $totalDiff;
+            }
+            return mt_rand(-1, 1);
+        });
+
+        $selected = $candidates[0];
+        $insertStmt->execute([
+            ':pid' => $selected,
+            ':type' => 'duty',
+            ':start' => $dateKey,
+            ':end' => $dateKey,
+        ]);
+        $eventId = (int) $db->lastInsertId();
+        $createdEvents[] = [
+            'id' => $eventId,
+            'participant_id' => $selected,
+            'type' => 'duty',
+            'start_date' => $dateKey,
+            'end_date' => $dateKey,
+        ];
+        $weekdayCounts[$selected][$weekday]++;
+        $totalCounts[$selected]++;
+        $lastAssignedParticipant = $selected;
+        $lastAssignedDate = $dateKey;
+    }
+
+    $response = ['events' => $createdEvents];
+    if (!empty($skippedDays)) {
+        $response['skipped'] = $skippedDays;
+    }
+
+    log_info('Автораспределение завершено', [
+        'created' => count($createdEvents),
+        'skipped' => $skippedDays,
+    ]);
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+}
+
+function handleClearMonthDuties(PDO $db): void
+{
+    $month = max(1, min(12, (int) ($_POST['month'] ?? date('n'))));
+    $year = (int) ($_POST['year'] ?? date('Y'));
+    [$startDate, $endDate] = monthBounds($year, $month);
+
+    log_info('Запрошено удаление дежурств за месяц', [
+        'month' => $month,
+        'year' => $year,
+    ]);
+
+    if (isMonthLocked($db, $year, $month)) {
+        log_warning('Удаление дежурств недоступно для утверждённого месяца', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+        respondLocked([[
+            'year' => $year,
+            'month' => $month,
+        ]]);
+        return;
+    }
+
+    if (!requireValidPassword($_POST['password'] ?? null, 'clear_month_duties')) {
+        return;
+    }
+
+    $countStmt = $db->prepare(
+        "SELECT COUNT(*) FROM events WHERE type = 'duty' AND date(start_date) BETWEEN :start AND :end"
+    );
+    $countStmt->execute([
+        ':start' => $startDate,
+        ':end' => $endDate,
+    ]);
+    $existing = (int) $countStmt->fetchColumn();
+
+    if ($existing === 0) {
+        log_info('Дежурства для удаления не найдены', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+        echo json_encode(['cleared' => 0], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $deleteStmt = $db->prepare(
+        "DELETE FROM events WHERE type = 'duty' AND date(start_date) BETWEEN :start AND :end"
+    );
+    $deleteStmt->execute([
+        ':start' => $startDate,
+        ':end' => $endDate,
+    ]);
+
+    log_info('Удалены дежурства за месяц', [
+        'month' => $month,
+        'year' => $year,
+        'removed' => $existing,
+    ]);
+
+    echo json_encode(['cleared' => $existing], JSON_UNESCAPED_UNICODE);
+}
+
+function handleSetMonthApproval(PDO $db): void
+{
+    $month = max(1, min(12, (int) ($_POST['month'] ?? date('n'))));
+    $year = (int) ($_POST['year'] ?? date('Y'));
+    $approved = filter_var($_POST['approved'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+    log_info('Изменение статуса утверждения месяца', [
+        'month' => $month,
+        'year' => $year,
+        'approved' => $approved,
+    ]);
+
+    if (!$approved && !requireValidPassword($_POST['password'] ?? null, 'set_month_approval')) {
+        return;
+    }
+
+    setMonthLocked($db, $year, $month, $approved);
+
+    if ($approved) {
+        log_info('Месяц утверждён', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+    } else {
+        log_info('Утверждение месяца снято', [
+            'month' => $month,
+            'year' => $year,
+        ]);
+    }
+
+    echo json_encode(['locked' => isMonthLocked($db, $year, $month)], JSON_UNESCAPED_UNICODE);
+}
+
+function handleGetStatistics(PDO $db): void
+{
+    $year = (int) ($_POST['year'] ?? date('Y'));
+    $yearString = sprintf('%04d', $year);
+    $participants = fetchParticipants($db);
+
+    log_info('Запрошена статистика', [
+        'year' => $year,
+    ]);
+
+    $weekdayData = [];
+    foreach ($participants as $participant) {
+        $weekdayData[$participant['id']] = array_fill(0, 7, 0);
+    }
+
+    $stmt = $db->prepare(
+        "SELECT participant_id, strftime('%w', start_date) AS weekday, COUNT(*) AS cnt
+         FROM events
+         WHERE type = 'duty' AND strftime('%Y', start_date) = :year
+         GROUP BY participant_id, weekday"
+    );
+    $stmt->execute([':year' => $yearString]);
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $pid = (int) $row['participant_id'];
+        if (!isset($weekdayData[$pid])) {
+            $weekdayData[$pid] = array_fill(0, 7, 0);
+        }
+        $weekdayData[$pid][(int) $row['weekday']] = (int) $row['cnt'];
+    }
+
+    $rangeStart = sprintf('%04d-01-01', $year);
+    $rangeEnd = sprintf('%04d-12-31', $year);
+    $stmt = $db->prepare(
+        "SELECT participant_id, type, start_date, end_date
+         FROM events
+         WHERE type IN ('vacation', 'sick')
+         AND NOT (date(end_date) < :start OR date(start_date) > :end)"
+    );
+    $stmt->execute([':start' => $rangeStart, ':end' => $rangeEnd]);
+
+    $extraData = [];
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $pid = (int) $row['participant_id'];
+        if (!isset($extraData[$pid])) {
+            $extraData[$pid] = ['vacation' => 0, 'sick' => 0];
+        }
+        $type = $row['type'];
+        $start = new DateTime(max($row['start_date'], $rangeStart));
+        $end = new DateTime(min($row['end_date'], $rangeEnd));
+        $days = (int) $end->diff($start)->format('%a') + 1;
+        if ($days < 0) {
+            $days = 0;
+        }
+        if ($type === 'vacation') {
+            $extraData[$pid]['vacation'] += $days;
+        } elseif ($type === 'sick') {
+            $extraData[$pid]['sick'] += $days;
+        }
+    }
+
+    $yearsStmt = $db->query("SELECT DISTINCT strftime('%Y', start_date) AS y FROM events ORDER BY y DESC");
+    $years = [];
+    while ($row = $yearsStmt->fetch(PDO::FETCH_ASSOC)) {
+        if ($row['y'] !== null) {
+            $years[] = (int) $row['y'];
+        }
+    }
+    if (!in_array($year, $years, true)) {
+        $years[] = $year;
+    }
+    rsort($years);
+
+    $result = [];
+    foreach ($participants as $participant) {
+        $pid = (int) $participant['id'];
+        $weekdays = $weekdayData[$pid] ?? array_fill(0, 7, 0);
+        $total = array_sum($weekdays);
+        $vacation = $extraData[$pid]['vacation'] ?? 0;
+        $sick = $extraData[$pid]['sick'] ?? 0;
+        $result[] = [
+            'id' => $pid,
+            'name' => $participant['name'],
+            'weekdays' => $weekdays,
+            'total' => $total,
+            'vacation' => $vacation,
+            'sick' => $sick,
+        ];
+    }
+
+    echo json_encode([
+        'year' => $year,
+        'years' => array_values(array_unique($years)),
+        'data' => $result,
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+function handleGenerateReport(PDO $db): void
+{
+    $month = max(1, min(12, (int) ($_POST['month'] ?? date('n'))));
+    $year = (int) ($_POST['year'] ?? date('Y'));
+
+    [$startDate, $endDate] = monthBounds($year, $month);
+    $participants = fetchParticipants($db);
+
+    log_info('Формирование отчета за месяц', [
+        'month' => $month,
+        'year' => $year,
+        'participants' => count($participants),
+    ]);
+
+    if (empty($participants)) {
+        http_response_code(422);
+        echo json_encode(['error' => 'Нет участников для формирования отчета'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $daysInMonth = cal_days_in_month(CAL_GREGORIAN, $month, $year);
+
+    $stmt = $db->prepare(
+        "SELECT id, participant_id, type, start_date, end_date FROM events WHERE type IN ('duty', 'vacation') AND NOT (date(end_date) < :start OR date(start_date) > :end)"
+    );
+    $stmt->execute([
+        ':start' => $startDate,
+        ':end' => $endDate,
+    ]);
+
+    $grid = [];
+    while ($event = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $pid = (int) $event['participant_id'];
+        if (!isset($grid[$pid])) {
+            $grid[$pid] = [];
+        }
+
+        $start = new DateTimeImmutable($event['start_date']);
+        $end = new DateTimeImmutable($event['end_date']);
+        for ($cursor = $start; $cursor <= $end; $cursor = $cursor->modify('+1 day')) {
+            $current = $cursor->format('Y-m-d');
+            if ($current < $startDate || $current > $endDate) {
+                continue;
+            }
+
+            $cellData = [
+                'type' => $event['type'],
+                'event_id' => (int) $event['id'],
+            ];
+
+            if ($event['type'] === 'vacation') {
+                if (!isset($grid[$pid][$current])) {
+                    $cellData['text'] = 'Отпуск';
+                    $grid[$pid][$current] = $cellData;
+                }
+            } elseif ($event['type'] === 'duty') {
+                $cellData['text'] = 'Х';
+                $grid[$pid][$current] = $cellData;
+            }
+        }
+    }
+
+    $weekendFill = 'C6F6D5';
+    $vacationFill = 'FFF59D';
+
+    $headers = [[
+        'text' => 'ФИО',
+        'bold' => true,
+        'alignment' => 'left',
+        'header' => true,
+    ]];
+
+    $weekendMap = [];
+    for ($day = 1; $day <= $daysInMonth; $day++) {
+        $dateKey = sprintf('%04d-%02d-%02d', $year, $month, $day);
+        $date = DateTimeImmutable::createFromFormat('Y-m-d', $dateKey);
+        $isWeekend = $date && ((int) $date->format('N') >= 6);
+        $weekendMap[$day] = $isWeekend;
+
+        $headerCell = [
+            'text' => (string) $day,
+            'bold' => true,
+            'alignment' => 'center',
+            'header' => true,
+        ];
+
+        if ($isWeekend) {
+            $headerCell['shading'] = $weekendFill;
+        }
+
+        $headers[] = $headerCell;
+    }
+
+    $rows = [];
+    foreach ($participants as $participant) {
+        $pid = (int) $participant['id'];
+        $row = [[
+            'text' => $participant['name'],
+            'alignment' => 'left',
+        ]];
+
+        $day = 1;
+        while ($day <= $daysInMonth) {
+            $dateKey = sprintf('%04d-%02d-%02d', $year, $month, $day);
+            $cellEvent = $grid[$pid][$dateKey] ?? null;
+
+            if (is_array($cellEvent) && $cellEvent['type'] === 'vacation') {
+                $eventId = $cellEvent['event_id'];
+                $span = 1;
+
+                for ($cursor = $day + 1; $cursor <= $daysInMonth; $cursor++) {
+                    $nextKey = sprintf('%04d-%02d-%02d', $year, $month, $cursor);
+                    $nextEvent = $grid[$pid][$nextKey] ?? null;
+                    if (!is_array($nextEvent) || $nextEvent['type'] !== 'vacation' || $nextEvent['event_id'] !== $eventId) {
+                        break;
+                    }
+                    $span++;
+                }
+
+                $row[] = [
+                    'text' => 'Отпуск',
+                    'alignment' => 'center',
+                    'span' => $span,
+                    'shading' => $vacationFill,
+                ];
+
+                for ($i = 1; $i < $span; $i++) {
+                    $row[] = ['skip' => true];
+                }
+
+                $day += $span;
+                continue;
+            }
+
+            $text = '';
+            if (is_array($cellEvent) && $cellEvent['type'] === 'duty') {
+                $text = 'Х';
+            }
+
+            $cell = [
+                'text' => $text,
+                'alignment' => 'center',
+            ];
+
+            if (!empty($weekendMap[$day])) {
+                $cell['shading'] = $weekendFill;
+            }
+
+            $row[] = $cell;
+            $day++;
+        }
+
+        $rows[] = $row;
+    }
+
+    if (!class_exists('ZipArchive')) {
+        log_error('Формирование отчета невозможно — отсутствует ZipArchive');
+        http_response_code(500);
+        echo json_encode(['error' => 'ZipArchive недоступен на сервере'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    try {
+        $filePath = createDutyReportDocx($headers, $rows, $year, $month);
+    } catch (Throwable $e) {
+        log_error('Не удалось сформировать DOCX-отчет', [
+            'error' => $e->getMessage(),
+        ]);
+        http_response_code(500);
+        echo json_encode(['error' => 'Не удалось сформировать отчет'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $fileName = sprintf('duty-report-%04d-%02d.docx', $year, $month);
+    $fileSize = @filesize($filePath) ?: null;
+
+    header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    header('Content-Disposition: attachment; filename="' . $fileName . '"');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
+    if ($fileSize !== null) {
+        header('Content-Length: ' . $fileSize);
+    }
+
+    readfile($filePath);
+    unlink($filePath);
+
+    log_info('DOCX-отчет сформирован и отправлен', [
+        'file' => $fileName,
+    ]);
+
+    exit;
+}
+
+function getEditPassword(): string
+{
+    $password = getenv('APP_EDIT_PASSWORD');
+    if ($password !== false && $password !== '') {
+        return (string) $password;
+    }
+
+    return DEFAULT_EDIT_PASSWORD;
+}
+
+function isPasswordValid(?string $value): bool
+{
+    $expected = (string) getEditPassword();
+    $provided = trim((string) $value);
+
+    if ($expected === '') {
+        return $provided === '';
+    }
+
+    return hash_equals($expected, $provided);
+}
+
+function requireValidPassword(?string $value, string $action): bool
+{
+    if (!isPasswordValid($value)) {
+        log_warning('Неверный пароль для действия', [
+            'action' => $action,
+        ]);
+        http_response_code(403);
+        echo json_encode(['error' => 'Неверный пароль'], JSON_UNESCAPED_UNICODE);
+        return false;
+    }
+
+    return true;
+}
+
+function isMonthLocked(PDO $db, int $year, int $month): bool
+{
+    $stmt = $db->prepare('SELECT approved FROM approvals WHERE year = :year AND month = :month LIMIT 1');
+    $stmt->execute([
+        ':year' => $year,
+        ':month' => $month,
+    ]);
+
+    return (bool) $stmt->fetchColumn();
+}
+
+function setMonthLocked(PDO $db, int $year, int $month, bool $locked): void
+{
+    $stmt = $db->prepare(
+        'INSERT INTO approvals (year, month, approved, approved_at)
+         VALUES (:year, :month, :approved, CASE WHEN :approved = 1 THEN CURRENT_TIMESTAMP ELSE NULL END)
+         ON CONFLICT(year, month) DO UPDATE SET
+            approved = excluded.approved,
+            approved_at = CASE WHEN excluded.approved = 1 THEN CURRENT_TIMESTAMP ELSE NULL END'
+    );
+    $stmt->execute([
+        ':year' => $year,
+        ':month' => $month,
+        ':approved' => $locked ? 1 : 0,
+    ]);
+}
+
+function getLockedMonthsInRange(PDO $db, string $start, string $end): array
+{
+    $startDate = DateTimeImmutable::createFromFormat('Y-m-d', $start);
+    $endDate = DateTimeImmutable::createFromFormat('Y-m-d', $end);
+    if (!$startDate || !$endDate) {
+        return [];
+    }
+
+    $cursor = new DateTimeImmutable($startDate->format('Y-m-01'));
+    $endCursor = new DateTimeImmutable($endDate->format('Y-m-01'));
+    $locked = [];
+
+    while ($cursor <= $endCursor) {
+        $year = (int) $cursor->format('Y');
+        $month = (int) $cursor->format('n');
+        if (isMonthLocked($db, $year, $month)) {
+            $locked[] = ['year' => $year, 'month' => $month];
+        }
+        $cursor = $cursor->modify('+1 month');
+    }
+
+    return $locked;
+}
+
+function respondLocked(array $lockedMonths): void
+{
+    http_response_code(423);
+
+    if (!empty($lockedMonths)) {
+        $first = $lockedMonths[0];
+        $message = sprintf(
+            'Месяц %s %d утвержден и недоступен для редактирования.',
+            monthNameRu((int) $first['month']),
+            (int) $first['year']
+        );
+    } else {
+        $message = 'Месяц утвержден и недоступен для редактирования.';
+    }
+
+    echo json_encode(['error' => $message], JSON_UNESCAPED_UNICODE);
+}
+
+function fetchParticipants(PDO $db): array
+{
+    $stmt = $db->query('SELECT id, name FROM participants ORDER BY sort_order, id');
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function monthBounds(int $year, int $month): array
+{
+    $start = sprintf('%04d-%02d-01', $year, $month);
+    $days = cal_days_in_month(CAL_GREGORIAN, $month, $year);
+    $end = sprintf('%04d-%02d-%02d', $year, $month, $days);
+    return [$start, $end];
+}
+
+function validateDate(string $value): bool
+{
+    $date = DateTime::createFromFormat('Y-m-d', $value);
+    return $date && $date->format('Y-m-d') === $value;
+}
+
+function areConsecutiveDates(string $previous, string $current): bool
+{
+    $prev = DateTimeImmutable::createFromFormat('Y-m-d', $previous);
+    $curr = DateTimeImmutable::createFromFormat('Y-m-d', $current);
+    if (!$prev || !$curr) {
+        return false;
+    }
+
+    return $prev->modify('+1 day')->format('Y-m-d') === $curr->format('Y-m-d');
+}
+
+function createDutyReportDocx(array $headers, array $rows, int $year, int $month): string
+{
+    $title = sprintf('График дежурств — %s %d', monthNameRu($month), $year);
+    $documentXml = buildReportDocumentXml($title, $headers, $rows);
+
+    $tmpFile = createReportTempFile();
+
+    $zip = new ZipArchive();
+    $opened = $zip->open($tmpFile, ZipArchive::OVERWRITE | ZipArchive::CREATE);
+
+    if ($opened !== true) {
+        @unlink($tmpFile);
+        throw new RuntimeException('Не удалось открыть архив для отчета');
+    }
+
+    $zip->addFromString('[Content_Types].xml', getDocxContentTypesXml());
+    $zip->addFromString('_rels/.rels', getDocxRelsXml());
+    $zip->addFromString('word/document.xml', $documentXml);
+    $zip->addFromString('word/styles.xml', getDocxStylesXml());
+    $zip->addFromString('word/_rels/document.xml.rels', getDocxDocumentRelsXml());
+    $zip->close();
+
+    return $tmpFile;
+}
+
+function createReportTempFile(): string
+{
+    $directories = [];
+
+    $customDir = trim((string) (getenv('APP_REPORT_TEMP_DIR') ?: ''));
+    if ($customDir !== '') {
+        if (!preg_match('/^(?:[a-zA-Z]:\\\\|\\\\\\\\|\/)/', $customDir)) {
+            $customDir = __DIR__ . DIRECTORY_SEPARATOR . $customDir;
+        }
+        $directories[] = $customDir;
+    }
+
+    $directories[] = __DIR__ . DIRECTORY_SEPARATOR . 'data';
+    $directories[] = __DIR__ . DIRECTORY_SEPARATOR . 'App_Data';
+    $directories[] = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'work-calendar';
+    $directories[] = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR);
+
+    $attempted = [];
+
+    foreach ($directories as $dir) {
+        $dir = rtrim($dir, "\\/");
+        if ($dir === '' || isset($attempted[$dir])) {
+            continue;
+        }
+        $attempted[$dir] = true;
+
+        if (!ensureDirectoryWritable($dir)) {
+            log_warning('Каталог недоступен для временного файла отчета', [
+                'directory' => $dir,
+            ]);
+            continue;
+        }
+
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $candidate = $dir . DIRECTORY_SEPARATOR . generateReportFileName();
+
+            $handle = @fopen($candidate, 'xb');
+            if ($handle === false) {
+                if (file_exists($candidate)) {
+                    continue;
+                }
+
+                log_warning('Не удалось зарезервировать файл для отчета', [
+                    'directory' => $dir,
+                    'path' => $candidate,
+                ]);
+                break;
+            }
+
+            fclose($handle);
+
+            log_info('Зарезервирован файл для отчета', [
+                'directory' => $dir,
+                'file' => $candidate,
+            ]);
+
+            return $candidate;
+        }
+    }
+
+    throw new RuntimeException('Не удалось создать временный файл для отчета');
+}
+
+function generateReportFileName(): string
+{
+    $timestamp = date('Ymd_His');
+
+    try {
+        $random = bin2hex(random_bytes(6));
+    } catch (Throwable $e) {
+        $random = substr(md5(uniqid((string) getmypid(), true)), 0, 12);
+    }
+
+    return sprintf('duty_report_%s_%s.docx', $timestamp, $random);
+}
+
+function buildReportDocumentXml(string $title, array $headers, array $rows): string
+{
+    $columnCount = max(1, count($headers));
+    $tableWidthTwips = 14500; // ширина страницы за вычетом полей в twips
+    $firstColumnWidth = 3200;
+    if ($columnCount === 1) {
+        $columnWidths = [$tableWidthTwips];
+    } else {
+        $remainingWidth = max($tableWidthTwips - $firstColumnWidth, 2000);
+        $otherColumnCount = $columnCount - 1;
+        $baseWidth = intdiv($remainingWidth, $otherColumnCount);
+        $columnWidths = [$firstColumnWidth];
+
+        for ($i = 0; $i < $otherColumnCount; $i++) {
+            $columnWidths[] = $baseWidth;
+        }
+
+        $allocated = array_sum($columnWidths);
+        $delta = $tableWidthTwips - $allocated;
+        if ($delta !== 0) {
+            $columnWidths[count($columnWidths) - 1] += $delta;
+        }
+    }
+
+    $lastColumnWidth = $columnWidths[count($columnWidths) - 1];
+
+    $table = '<w:tbl>'
+        . '<w:tblPr>'
+        . '<w:tblStyle w:val="TableGrid"/>'
+        . '<w:tblW w:w="' . $tableWidthTwips . '" w:type="dxa"/>'
+        . '<w:tblLayout w:type="Fixed"/>'
+        . '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="0"/>'
+        . '<w:tblBorders>'
+        . '<w:top w:val="single" w:sz="8" w:space="0" w:color="auto"/>'
+        . '<w:left w:val="single" w:sz="8" w:space="0" w:color="auto"/>'
+        . '<w:bottom w:val="single" w:sz="8" w:space="0" w:color="auto"/>'
+        . '<w:right w:val="single" w:sz="8" w:space="0" w:color="auto"/>'
+        . '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+        . '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+        . '</w:tblBorders>'
+        . '</w:tblPr>'
+        . '<w:tblGrid>';
+
+    foreach ($columnWidths as $width) {
+        $table .= '<w:gridCol w:w="' . $width . '"/>';
+    }
+    $table .= '</w:tblGrid>';
+
+    $table .= '<w:tr><w:trPr><w:tblHeader/></w:trPr>';
+    for ($colIndex = 0; $colIndex < $columnCount; $colIndex++) {
+        $cellData = $headers[$colIndex] ?? [];
+        if (isset($cellData['skip']) && $cellData['skip']) {
+            continue;
+        }
+
+        if (!is_array($cellData)) {
+            $cellData = ['text' => (string) $cellData];
+        }
+
+        if (!isset($cellData['span']) || (int) $cellData['span'] < 1) {
+            $cellData['span'] = 1;
+        }
+
+        $cellData['header'] = $cellData['header'] ?? true;
+        $cellData['bold'] = $cellData['bold'] ?? true;
+
+        $span = (int) $cellData['span'];
+        $width = 0;
+        for ($offset = 0; $offset < $span; $offset++) {
+            $width += $columnWidths[$colIndex + $offset] ?? $lastColumnWidth;
+        }
+
+        $table .= buildTableCellXml($cellData, $width);
+
+        if ($span > 1) {
+            $colIndex += $span - 1;
+        }
+    }
+    $table .= '</w:tr>';
+
+    foreach ($rows as $row) {
+        $table .= '<w:tr>';
+        for ($colIndex = 0; $colIndex < $columnCount; $colIndex++) {
+            $cellData = $row[$colIndex] ?? [];
+            if (isset($cellData['skip']) && $cellData['skip']) {
+                continue;
+            }
+
+            if (!is_array($cellData)) {
+                $cellData = ['text' => (string) $cellData];
+            }
+
+            if (!isset($cellData['span']) || (int) $cellData['span'] < 1) {
+                $cellData['span'] = 1;
+            }
+
+            $cellData['header'] = false;
+            $cellData['bold'] = $cellData['bold'] ?? false;
+
+            $span = (int) $cellData['span'];
+            $width = 0;
+            for ($offset = 0; $offset < $span; $offset++) {
+                $width += $columnWidths[$colIndex + $offset] ?? $lastColumnWidth;
+            }
+
+            $table .= buildTableCellXml($cellData, $width);
+
+            if ($span > 1) {
+                $colIndex += $span - 1;
+            }
+        }
+        $table .= '</w:tr>';
+    }
+
+    $table .= '</w:tbl>';
+
+    $body = '<w:body>'
+        . '<w:p>'
+        . '<w:pPr><w:jc w:val="center"/></w:pPr>'
+        . '<w:r>'
+        . '<w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr>'
+        . '<w:t xml:space="preserve">' . docxEscape($title) . '</w:t>'
+        . '</w:r>'
+        . '</w:p>'
+        . $table
+        . '<w:sectPr>'
+        . '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
+        . '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/>'
+        . '<w:cols w:space="708"/>'
+        . '<w:docGrid w:linePitch="360"/>'
+        . '</w:sectPr>'
+        . '</w:body>';
+
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        . ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+        . '>'
+        . $body
+        . '</w:document>';
+}
+
+function buildTableCellXml(array $cell, int $width): string
+{
+    $text = (string) ($cell['text'] ?? '');
+    $bold = !empty($cell['bold']);
+    $alignment = $cell['alignment'] ?? null;
+    $isHeader = !empty($cell['header']);
+    $shading = $cell['shading'] ?? null;
+    $span = max(1, (int) ($cell['span'] ?? 1));
+
+    $tcPrParts = ['<w:tcW w:w="' . max(0, $width) . '" w:type="dxa"/>'];
+
+    if ($span > 1) {
+        $tcPrParts[] = '<w:gridSpan w:val="' . $span . '"/>';
+    }
+
+    if ($shading) {
+        $tcPrParts[] = '<w:shd w:val="clear" w:color="auto" w:fill="' . $shading . '"/>';
+    } elseif ($isHeader) {
+        $tcPrParts[] = '<w:shd w:val="clear" w:color="auto" w:fill="E2E8F0"/>';
+    }
+
+    $tcPr = '<w:tcPr>' . implode('', $tcPrParts) . '</w:tcPr>';
+
+    $pPr = '';
+    if ($alignment !== null && $alignment !== '') {
+        $pPr = '<w:pPr><w:jc w:val="' . $alignment . '"/></w:pPr>';
+    }
+
+    $escaped = docxEscape($text);
+    $runProps = $bold ? '<w:rPr><w:b/><w:bCs/></w:rPr>' : '';
+    $textNode = $escaped === ''
+        ? '<w:t/>'
+        : '<w:t xml:space="preserve">' . $escaped . '</w:t>';
+
+    return '<w:tc>' . $tcPr . '<w:p>' . $pPr . '<w:r>' . $runProps . $textNode . '</w:r></w:p></w:tc>';
+}
+
+function docxEscape(string $text): string
+{
+    return htmlspecialchars($text, ENT_QUOTES | ENT_XML1, 'UTF-8');
+}
+
+function getDocxContentTypesXml(): string
+{
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        . '<Default Extension="xml" ContentType="application/xml"/>'
+        . '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        . '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+        . '</Types>';
+}
+
+function getDocxRelsXml(): string
+{
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        . '</Relationships>';
+}
+
+function getDocxDocumentRelsXml(): string
+{
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>';
+}
+
+function getDocxStylesXml(): string
+{
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        . '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+        . '<w:name w:val="Normal"/>'
+        . '<w:qFormat/>'
+        . '</w:style>'
+        . '<w:style w:type="table" w:styleId="TableGrid">'
+        . '<w:name w:val="Table Grid"/>'
+        . '<w:basedOn w:val="TableNormal"/>'
+        . '<w:uiPriority w:val="59"/>'
+        . '<w:tblPr>'
+        . '<w:tblBorders>'
+        . '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+        . '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+        . '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+        . '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+        . '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+        . '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+        . '</w:tblBorders>'
+        . '</w:tblPr>'
+        . '</w:style>'
+        . '</w:styles>';
+}
+
+function monthNameRu(int $month): string
+{
+    $months = [
+        1 => 'Январь',
+        2 => 'Февраль',
+        3 => 'Март',
+        4 => 'Апрель',
+        5 => 'Май',
+        6 => 'Июнь',
+        7 => 'Июль',
+        8 => 'Август',
+        9 => 'Сентябрь',
+        10 => 'Октябрь',
+        11 => 'Ноябрь',
+        12 => 'Декабрь',
+    ];
+
+    return $months[$month] ?? '';
+}

@@ -728,7 +728,7 @@ function handleGenerateReport(PDO $db): void
     $daysInMonth = cal_days_in_month(CAL_GREGORIAN, $month, $year);
 
     $stmt = $db->prepare(
-        "SELECT participant_id, type, start_date, end_date FROM events WHERE type IN ('duty', 'vacation') AND NOT (date(end_date) < :start OR date(start_date) > :end)"
+        "SELECT id, participant_id, type, start_date, end_date FROM events WHERE type IN ('duty', 'vacation') AND NOT (date(end_date) < :start OR date(start_date) > :end)"
     );
     $stmt->execute([
         ':start' => $startDate,
@@ -750,29 +750,113 @@ function handleGenerateReport(PDO $db): void
                 continue;
             }
 
+            $cellData = [
+                'type' => $event['type'],
+                'event_id' => (int) $event['id'],
+            ];
+
             if ($event['type'] === 'vacation') {
                 if (!isset($grid[$pid][$current])) {
-                    $grid[$pid][$current] = 'Отпуск';
+                    $cellData['text'] = 'Отпуск';
+                    $grid[$pid][$current] = $cellData;
                 }
             } elseif ($event['type'] === 'duty') {
-                $grid[$pid][$current] = 'Х';
+                $cellData['text'] = 'Х';
+                $grid[$pid][$current] = $cellData;
             }
         }
     }
 
-    $headers = ['ФИО'];
+    $weekendFill = 'C6F6D5';
+    $vacationFill = 'FFF59D';
+
+    $headers = [[
+        'text' => 'ФИО',
+        'bold' => true,
+        'alignment' => 'left',
+        'header' => true,
+    ]];
+
+    $weekendMap = [];
     for ($day = 1; $day <= $daysInMonth; $day++) {
-        $headers[] = (string) $day;
+        $dateKey = sprintf('%04d-%02d-%02d', $year, $month, $day);
+        $date = DateTimeImmutable::createFromFormat('Y-m-d', $dateKey);
+        $isWeekend = $date && ((int) $date->format('N') >= 6);
+        $weekendMap[$day] = $isWeekend;
+
+        $headerCell = [
+            'text' => (string) $day,
+            'bold' => true,
+            'alignment' => 'center',
+            'header' => true,
+        ];
+
+        if ($isWeekend) {
+            $headerCell['shading'] = $weekendFill;
+        }
+
+        $headers[] = $headerCell;
     }
 
     $rows = [];
     foreach ($participants as $participant) {
         $pid = (int) $participant['id'];
-        $row = [$participant['name']];
-        for ($day = 1; $day <= $daysInMonth; $day++) {
+        $row = [[
+            'text' => $participant['name'],
+            'alignment' => 'left',
+        ]];
+
+        $day = 1;
+        while ($day <= $daysInMonth) {
             $dateKey = sprintf('%04d-%02d-%02d', $year, $month, $day);
-            $row[] = $grid[$pid][$dateKey] ?? '';
+            $cellEvent = $grid[$pid][$dateKey] ?? null;
+
+            if (is_array($cellEvent) && $cellEvent['type'] === 'vacation') {
+                $eventId = $cellEvent['event_id'];
+                $span = 1;
+
+                for ($cursor = $day + 1; $cursor <= $daysInMonth; $cursor++) {
+                    $nextKey = sprintf('%04d-%02d-%02d', $year, $month, $cursor);
+                    $nextEvent = $grid[$pid][$nextKey] ?? null;
+                    if (!is_array($nextEvent) || $nextEvent['type'] !== 'vacation' || $nextEvent['event_id'] !== $eventId) {
+                        break;
+                    }
+                    $span++;
+                }
+
+                $row[] = [
+                    'text' => 'Отпуск',
+                    'alignment' => 'center',
+                    'span' => $span,
+                    'shading' => $vacationFill,
+                ];
+
+                for ($i = 1; $i < $span; $i++) {
+                    $row[] = ['skip' => true];
+                }
+
+                $day += $span;
+                continue;
+            }
+
+            $text = '';
+            if (is_array($cellEvent) && $cellEvent['type'] === 'duty') {
+                $text = 'Х';
+            }
+
+            $cell = [
+                'text' => $text,
+                'alignment' => 'center',
+            ];
+
+            if (!empty($weekendMap[$day])) {
+                $cell['shading'] = $weekendFill;
+            }
+
+            $row[] = $cell;
+            $day++;
         }
+
         $rows[] = $row;
     }
 
@@ -1101,19 +1185,67 @@ function buildReportDocumentXml(string $title, array $headers, array $rows): str
     $table .= '</w:tblGrid>';
 
     $table .= '<w:tr><w:trPr><w:tblHeader/></w:trPr>';
-    foreach ($headers as $index => $headerText) {
-        $alignment = $index === 0 ? 'left' : 'center';
-        $width = $columnWidths[$index] ?? $lastColumnWidth;
-        $table .= buildTableCellXml((string) $headerText, true, $alignment, true, $width);
+    for ($colIndex = 0; $colIndex < $columnCount; $colIndex++) {
+        $cellData = $headers[$colIndex] ?? [];
+        if (isset($cellData['skip']) && $cellData['skip']) {
+            continue;
+        }
+
+        if (!is_array($cellData)) {
+            $cellData = ['text' => (string) $cellData];
+        }
+
+        if (!isset($cellData['span']) || (int) $cellData['span'] < 1) {
+            $cellData['span'] = 1;
+        }
+
+        $cellData['header'] = $cellData['header'] ?? true;
+        $cellData['bold'] = $cellData['bold'] ?? true;
+
+        $span = (int) $cellData['span'];
+        $width = 0;
+        for ($offset = 0; $offset < $span; $offset++) {
+            $width += $columnWidths[$colIndex + $offset] ?? $lastColumnWidth;
+        }
+
+        $table .= buildTableCellXml($cellData, $width);
+
+        if ($span > 1) {
+            $colIndex += $span - 1;
+        }
     }
     $table .= '</w:tr>';
 
     foreach ($rows as $row) {
         $table .= '<w:tr>';
-        foreach ($row as $index => $cellText) {
-            $alignment = $index === 0 ? 'left' : 'center';
-            $width = $columnWidths[$index] ?? $lastColumnWidth;
-            $table .= buildTableCellXml((string) $cellText, false, $alignment, false, $width);
+        for ($colIndex = 0; $colIndex < $columnCount; $colIndex++) {
+            $cellData = $row[$colIndex] ?? [];
+            if (isset($cellData['skip']) && $cellData['skip']) {
+                continue;
+            }
+
+            if (!is_array($cellData)) {
+                $cellData = ['text' => (string) $cellData];
+            }
+
+            if (!isset($cellData['span']) || (int) $cellData['span'] < 1) {
+                $cellData['span'] = 1;
+            }
+
+            $cellData['header'] = false;
+            $cellData['bold'] = $cellData['bold'] ?? false;
+
+            $span = (int) $cellData['span'];
+            $width = 0;
+            for ($offset = 0; $offset < $span; $offset++) {
+                $width += $columnWidths[$colIndex + $offset] ?? $lastColumnWidth;
+            }
+
+            $table .= buildTableCellXml($cellData, $width);
+
+            if ($span > 1) {
+                $colIndex += $span - 1;
+            }
         }
         $table .= '</w:tr>';
     }
@@ -1145,17 +1277,31 @@ function buildReportDocumentXml(string $title, array $headers, array $rows): str
         . '</w:document>';
 }
 
-function buildTableCellXml(string $text, bool $bold, ?string $alignment, bool $highlightHeader, int $width): string
+function buildTableCellXml(array $cell, int $width): string
 {
-    $tcPrParts = ['<w:tcW w:w="' . $width . '" w:type="dxa"/>'];
-    if ($highlightHeader) {
+    $text = (string) ($cell['text'] ?? '');
+    $bold = !empty($cell['bold']);
+    $alignment = $cell['alignment'] ?? null;
+    $isHeader = !empty($cell['header']);
+    $shading = $cell['shading'] ?? null;
+    $span = max(1, (int) ($cell['span'] ?? 1));
+
+    $tcPrParts = ['<w:tcW w:w="' . max(0, $width) . '" w:type="dxa"/>'];
+
+    if ($span > 1) {
+        $tcPrParts[] = '<w:gridSpan w:val="' . $span . '"/>';
+    }
+
+    if ($shading) {
+        $tcPrParts[] = '<w:shd w:val="clear" w:color="auto" w:fill="' . $shading . '"/>';
+    } elseif ($isHeader) {
         $tcPrParts[] = '<w:shd w:val="clear" w:color="auto" w:fill="E2E8F0"/>';
     }
 
     $tcPr = '<w:tcPr>' . implode('', $tcPrParts) . '</w:tcPr>';
 
     $pPr = '';
-    if ($alignment !== null) {
+    if ($alignment !== null && $alignment !== '') {
         $pPr = '<w:pPr><w:jc w:val="' . $alignment . '"/></w:pPr>';
     }
 

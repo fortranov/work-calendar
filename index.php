@@ -70,6 +70,8 @@ $page = $page === 'stats' ? 'stats' : 'home';
                                 <th>Вс</th>
                                 <th>Отпуск</th>
                                 <th>Больничный</th>
+                                <th>Командировка</th>
+                                <th>Учеба</th>
                                 <th>Всего</th>
                             </tr>
                         </thead>
@@ -86,6 +88,7 @@ $page = $page === 'stats' ? 'stats' : 'home';
         <button type="button" data-type="vacation">Отпуск</button>
         <button type="button" data-type="trip">Командировка</button>
         <button type="button" data-type="sick">Больничный</button>
+        <button type="button" data-type="study">Учеба</button>
     </div>
 
     <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true">

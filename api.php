@@ -225,7 +225,7 @@ function handleSaveEvent(PDO $db): void
         return;
     }
 
-    $allowed = ['duty', 'important', 'vacation', 'trip', 'sick'];
+    $allowed = ['duty', 'important', 'vacation', 'trip', 'sick', 'study'];
     if (!in_array($type, $allowed, true)) {
         log_warning('Попытка сохранить событие с неизвестным типом', [
             'type' => $type,
@@ -644,7 +644,7 @@ function handleGetStatistics(PDO $db): void
     $stmt = $db->prepare(
         "SELECT participant_id, type, start_date, end_date
          FROM events
-         WHERE type IN ('vacation', 'sick')
+         WHERE type IN ('vacation', 'sick', 'trip', 'study')
          AND NOT (date(end_date) < :start OR date(start_date) > :end)"
     );
     $stmt->execute([':start' => $rangeStart, ':end' => $rangeEnd]);
@@ -653,7 +653,12 @@ function handleGetStatistics(PDO $db): void
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $pid = (int) $row['participant_id'];
         if (!isset($extraData[$pid])) {
-            $extraData[$pid] = ['vacation' => 0, 'sick' => 0];
+            $extraData[$pid] = [
+                'vacation' => 0,
+                'sick' => 0,
+                'trip' => 0,
+                'study' => 0,
+            ];
         }
         $type = $row['type'];
         $start = new DateTime(max($row['start_date'], $rangeStart));
@@ -662,10 +667,8 @@ function handleGetStatistics(PDO $db): void
         if ($days < 0) {
             $days = 0;
         }
-        if ($type === 'vacation') {
-            $extraData[$pid]['vacation'] += $days;
-        } elseif ($type === 'sick') {
-            $extraData[$pid]['sick'] += $days;
+        if (isset($extraData[$pid][$type])) {
+            $extraData[$pid][$type] += $days;
         }
     }
 
@@ -688,6 +691,8 @@ function handleGetStatistics(PDO $db): void
         $total = array_sum($weekdays);
         $vacation = $extraData[$pid]['vacation'] ?? 0;
         $sick = $extraData[$pid]['sick'] ?? 0;
+        $trip = $extraData[$pid]['trip'] ?? 0;
+        $study = $extraData[$pid]['study'] ?? 0;
         $result[] = [
             'id' => $pid,
             'name' => $participant['name'],
@@ -695,6 +700,8 @@ function handleGetStatistics(PDO $db): void
             'total' => $total,
             'vacation' => $vacation,
             'sick' => $sick,
+            'trip' => $trip,
+            'study' => $study,
         ];
     }
 
@@ -728,12 +735,19 @@ function handleGenerateReport(PDO $db): void
     $daysInMonth = cal_days_in_month(CAL_GREGORIAN, $month, $year);
 
     $stmt = $db->prepare(
-        "SELECT id, participant_id, type, start_date, end_date FROM events WHERE type IN ('duty', 'vacation') AND NOT (date(end_date) < :start OR date(start_date) > :end)"
+        "SELECT id, participant_id, type, start_date, end_date FROM events WHERE type IN ('duty', 'vacation', 'trip', 'sick', 'study') AND NOT (date(end_date) < :start OR date(start_date) > :end)"
     );
     $stmt->execute([
         ':start' => $startDate,
         ':end' => $endDate,
     ]);
+
+    $rangeMeta = [
+        'vacation' => ['label' => 'Отпуск', 'fill' => 'FFF59D'],
+        'trip' => ['label' => 'Командировка', 'fill' => 'E9D5FF'],
+        'sick' => ['label' => 'Больничный', 'fill' => 'BFDBFE'],
+        'study' => ['label' => 'Учеба', 'fill' => 'CFFAFE'],
+    ];
 
     $grid = [];
     while ($event = $stmt->fetch(PDO::FETCH_ASSOC)) {
@@ -755,9 +769,9 @@ function handleGenerateReport(PDO $db): void
                 'event_id' => (int) $event['id'],
             ];
 
-            if ($event['type'] === 'vacation') {
+            if (isset($rangeMeta[$event['type']])) {
                 if (!isset($grid[$pid][$current])) {
-                    $cellData['text'] = 'Отпуск';
+                    $cellData['text'] = $rangeMeta[$event['type']]['label'];
                     $grid[$pid][$current] = $cellData;
                 }
             } elseif ($event['type'] === 'duty') {
@@ -768,7 +782,6 @@ function handleGenerateReport(PDO $db): void
     }
 
     $weekendFill = 'C6F6D5';
-    $vacationFill = 'FFF59D';
 
     $headers = [[
         'text' => 'ФИО',
@@ -811,24 +824,25 @@ function handleGenerateReport(PDO $db): void
             $dateKey = sprintf('%04d-%02d-%02d', $year, $month, $day);
             $cellEvent = $grid[$pid][$dateKey] ?? null;
 
-            if (is_array($cellEvent) && $cellEvent['type'] === 'vacation') {
+            if (is_array($cellEvent) && isset($rangeMeta[$cellEvent['type']])) {
                 $eventId = $cellEvent['event_id'];
+                $eventType = $cellEvent['type'];
                 $span = 1;
 
                 for ($cursor = $day + 1; $cursor <= $daysInMonth; $cursor++) {
                     $nextKey = sprintf('%04d-%02d-%02d', $year, $month, $cursor);
                     $nextEvent = $grid[$pid][$nextKey] ?? null;
-                    if (!is_array($nextEvent) || $nextEvent['type'] !== 'vacation' || $nextEvent['event_id'] !== $eventId) {
+                    if (!is_array($nextEvent) || $nextEvent['type'] !== $eventType || $nextEvent['event_id'] !== $eventId) {
                         break;
                     }
                     $span++;
                 }
 
                 $row[] = [
-                    'text' => 'Отпуск',
+                    'text' => $rangeMeta[$eventType]['label'],
                     'alignment' => 'center',
                     'span' => $span,
-                    'shading' => $vacationFill,
+                    'shading' => $rangeMeta[$eventType]['fill'],
                 ];
 
                 for ($i = 1; $i < $span; $i++) {

@@ -42,9 +42,10 @@
             vacation: 'Отпуск',
             trip: 'Командировка',
             sick: 'Больничный',
+            study: 'Учеба',
         };
 
-        const rangeTypes = ['vacation', 'trip', 'sick'];
+        const rangeTypes = ['vacation', 'trip', 'sick', 'study'];
 
         updateControlsState();
         loadCalendar();
@@ -796,7 +797,7 @@
                     renderStats(data);
                 })
                 .catch(() => {
-                    tbody.innerHTML = '<tr><td colspan="11">Не удалось загрузить статистику</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="13">Не удалось загрузить статистику</td></tr>';
                 });
         }
 
@@ -828,13 +829,11 @@
                     tr.appendChild(td);
                 });
 
-                const vacation = document.createElement('td');
-                vacation.textContent = row.vacation || 0;
-                tr.appendChild(vacation);
-
-                const sick = document.createElement('td');
-                sick.textContent = row.sick || 0;
-                tr.appendChild(sick);
+                ['vacation', 'sick', 'trip', 'study'].forEach((field) => {
+                    const td = document.createElement('td');
+                    td.textContent = row[field] || 0;
+                    tr.appendChild(td);
+                });
 
                 const total = document.createElement('td');
                 total.textContent = row.total || 0;
@@ -844,7 +843,7 @@
             });
 
             if (!tbody.children.length) {
-                tbody.innerHTML = '<tr><td colspan="11">Нет данных</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="13">Нет данных</td></tr>';
             }
         }
     }

@@ -20,8 +20,9 @@
     --shadow-sm: 0 8px 25px rgba(15, 23, 42, 0.15);
     --weekend-bg: rgba(16, 185, 129, 0.18);
     --range-vacation: rgba(251, 191, 36, 0.35);
-    --range-trip: rgba(129, 140, 248, 0.35);
+    --range-trip: rgba(165, 180, 252, 0.4);
     --range-sick: rgba(96, 165, 250, 0.35);
+    --range-study: rgba(125, 211, 252, 0.35);
     --important-color: #ef4444;
 }
 
@@ -344,11 +345,25 @@ a {
     position: relative;
 }
 
+.calendar-table tbody tr::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: var(--surface-strong);
+    z-index: -1;
+    pointer-events: none;
+    transition: background 0.2s ease;
+}
+
 .calendar-table tbody tr:hover {
     z-index: 4;
 }
 
-.calendar-table tbody tr:hover td:not(:first-child):not(.weekend):not(.range-vacation):not(.range-trip):not(.range-sick) {
+.calendar-table tbody tr:hover::before {
+    background: #f8faff;
+}
+
+.calendar-table tbody tr:hover td:not(:first-child):not(.weekend):not(.range-vacation):not(.range-trip):not(.range-sick):not(.range-study) {
     background: #f8faff;
 }
 
@@ -356,7 +371,7 @@ a {
     background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(244, 244, 255, 0.92));
 }
 
-.calendar-table tbody tr:hover td.weekend:not(.range-vacation):not(.range-trip):not(.range-sick) {
+.calendar-table tbody tr:hover td.weekend:not(.range-vacation):not(.range-trip):not(.range-sick):not(.range-study) {
     background: rgba(16, 185, 129, 0.32);
 }
 
@@ -387,7 +402,8 @@ a {
 
 .calendar-table td.range-vacation,
 .calendar-table td.range-trip,
-.calendar-table td.range-sick {
+.calendar-table td.range-sick,
+.calendar-table td.range-study {
     color: var(--text-color);
 }
 
@@ -401,6 +417,10 @@ a {
 
 .calendar-table td.range-sick {
     background: var(--range-sick);
+}
+
+.calendar-table td.range-study {
+    background: var(--range-study);
 }
 
 .calendar-table td.range-start {

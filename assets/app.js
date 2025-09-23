@@ -175,6 +175,10 @@
                     btn.classList.toggle('hidden', !showEditingActions);
                 }
             });
+
+            if (document.body) {
+                document.body.classList.toggle('editing-active', showEditingActions);
+            }
         }
 
         function requestPassword(message) {
